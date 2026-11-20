@@ -1,0 +1,6 @@
+# Local development only. Copy to .dev.vars.
+KEK_1=
+SETUP_TOKEN=
+DEV_TOOLS=1
+APP_URL=
+MAIL_FROM=

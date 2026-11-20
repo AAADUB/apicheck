@@ -1,0 +1,32 @@
+{
+  // API Check on Cloudflare: one Worker serves the interface (static assets) and the API, with D1, a Durable Object per provider key and a cron trigger.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "apicheck",
+  "main": "worker/src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // the closed workspace lives at https://apicheck.aaadub.workers.dev; preview addresses are off
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    // the production database; for a copy of your own: `wrangler d1 create apicheck` and put its id here
+    {"binding": "DB", "database_name": "apicheck", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations"}
+  ],
+  // one Watcher per provider key: it runs every watch on that key from an alarm loop (seconds, not minutes)
+  "durable_objects": {"bindings": [{"name": "WATCHER", "class_name": "Watcher"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["Watcher"]}],
+  // every minute: wake the loops that should be running, and once an hour tidy old rows
+  "triggers": {"crons": ["* * * * *"]},
+  // email through Cloudflare Email Service, from the sending subdomain mail.miartech.co (already onboarded in this account)
+  "send_email": [{"name": "EMAIL"}],
+  "ratelimits": [{"name": "LOGIN_LIMIT", "namespace_id": "20261121", "simple": {"limit": 10, "period": 60}}],
+  "observability": {"enabled": true},
+  "vars": {"KEK_CURRENT": "1", "APP_URL": "https://apicheck.aaadub.workers.dev", "MAIL_FROM": "apicheck@mail.miartech.co"}
+  // secrets: KEK_1 (32 random bytes, base64) and, only for first run or recovery, SETUP_TOKEN
+}

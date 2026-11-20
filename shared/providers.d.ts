@@ -1,0 +1,9 @@
+export const LIMITS: Record<string, {min: number; def: number; launchGap: number}>;
+export const EVERY_MAX: number;
+export const PARAMS: Record<string, {id: string; label: string; choices: [string | number, string][]; def: string | number}[]>;
+export const PROVIDERS: Record<string, any>;
+export const DEV_PROVIDER: Record<string, any>;
+export const LEVEL_NAME: Record<string, string>;
+export function levelRank(l: string): number;
+export function providerOf(id: string, dev?: boolean): any;
+export function cleanLaunch(provider: string, raw: any, dev?: boolean): Record<string, unknown>;
