@@ -15,8 +15,8 @@
     "run_worker_first": ["/api/*"]
   },
   "d1_databases": [
-    // the production database; for a copy of your own: `wrangler d1 create apicheck` and put its id here
-    {"binding": "DB", "database_name": "apicheck", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations"}
+    // the production database (created 20.11.2026, Western Europe); for a copy of your own: `wrangler d1 create apicheck` and put its id here
+    {"binding": "DB", "database_name": "apicheck", "database_id": "ae5aabbc-048d-4018-85ea-7b4e275122e4", "migrations_dir": "migrations"}
   ],
   // one Watcher per provider key: it runs every watch on that key from an alarm loop (seconds, not minutes)
   "durable_objects": {"bindings": [{"name": "WATCHER", "class_name": "Watcher"}]},
