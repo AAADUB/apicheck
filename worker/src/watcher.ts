@@ -44,6 +44,7 @@ export class Watcher extends DurableObject<Env> {
   ignored = new Set<string>();           // machines terminated here a moment ago, still listed while they wind down
   odd = new Map<string, number>();       // refusals that do not read like "no capacity", counted
   authTurn = 0;
+  pace = 0;                              // the slowest interval the provider's rate-limit headers asked for, last turn
   authFails = 0;                         // refusals of the key in a row; one alone may be an edge hiccup
   guardAt = 0;
   guardWarnAt = 0;
@@ -71,7 +72,18 @@ export class Watcher extends DurableObject<Env> {
     if (this.busy) { await this.ctx.storage.setAlarm(Date.now() + 1000); return; }
     this.busy = true;
     let next: number | null = null;
-    try { next = await this.tick(Date.now()); }
+    // short intervals are kept inside one wake-up: an alarm is delivered with a delay of its own (about a second was measured),
+    // so re-arming it every 2 s would turn 2 s into 3 to 5. Up to 25 s are spent here, then the alarm takes over again.
+    const end = Date.now() + 25e3;
+    try {
+      for (;;) {
+        next = await this.tick(Date.now());
+        if (!next) break;
+        const wait = next - Date.now();
+        if (wait > 5e3 || Date.now() + wait > end) break;
+        if (wait > 0) await sleep(wait);
+      }
+    }
     catch (e) { console.error('watcher', this.keyId, (e as Error).message); next = Date.now() + 15e3; }
     finally { this.busy = false; }
     if (next) await this.ctx.storage.setAlarm(Math.max(next, Date.now() + 250));
@@ -130,6 +142,7 @@ export class Watcher extends DurableObject<Env> {
       }
       // the provider's own rate-limit headers set the floor for every watch on this key (RunPod)
       if (c.pace) for (const w of live) { const r = this.runs.get(w.id); if (r) r.next = Math.max(r.next, now + c.pace); }
+      this.pace = c.pace || 0;
       await this.save(now, false);
     }
     await this.upkeep(P, now);
@@ -494,7 +507,7 @@ export class Watcher extends DurableObject<Env> {
     for (const w of this.watches) {
       const r = this.runs.get(w.id); if (!r || (!force && !r.dirty) || (!force && now - r.savedAt < SAVE_MS && !this.changed(r))) continue;
       st.push(this.env.DB.prepare('UPDATE watches SET checks = ?, last_check_at = ?, last_ok_at = COALESCE(?, last_ok_at), last_seen_at = ?, last_error = ?, status = ? WHERE id = ?')
-        .bind(r.checks, r.lastAt || null, r.okAt || null, w.last_seen_at, r.err || null, JSON.stringify({found: r.found.slice(0, 20), err: r.err, errSince: r.errSince, next: r.next, pre: r.pre}), w.id));
+        .bind(r.checks, r.lastAt || null, r.okAt || null, w.last_seen_at, r.err || null, JSON.stringify({found: r.found.slice(0, 20), err: r.err, errSince: r.errSince, next: r.next, pre: r.pre, pace: this.pace || undefined}), w.id));
       r.savedAt = now; r.dirty = false; (r as any).sig = this.sig(r);
     }
     if (st.length) await this.env.DB.batch(st);
