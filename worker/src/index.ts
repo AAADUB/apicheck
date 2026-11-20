@@ -61,7 +61,9 @@ export default {
           env.DB.prepare('DELETE FROM invites WHERE expires_at < ?').bind(now - 30 * d),
           env.DB.prepare('DELETE FROM events WHERE at < ?').bind(now - 120 * d),
           env.DB.prepare('DELETE FROM windows WHERE end_at IS NOT NULL AND end_at < ?').bind(now - 120 * d),
-          env.DB.prepare('DELETE FROM notices WHERE at < ?').bind(now - 180 * d)
+          env.DB.prepare('DELETE FROM notices WHERE at < ?').bind(now - 180 * d),
+          // a launch still pending after ten minutes was cut off with no one left to settle it: it counts as unconfirmed until a person looks
+          env.DB.prepare("UPDATE launches SET state = 'unknown', error = 'Interrupted with no answer recorded. Check the provider console for a machine named ' || name || '.', updated_at = ? WHERE state = 'pending' AND created_at < ?").bind(now, now - 10 * 60e3)
         ]);
       }
     })());

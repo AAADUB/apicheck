@@ -8,18 +8,24 @@ import {openKey, newId} from './crypto';
 import {PROVIDERS} from './providers';
 import {tell, appLink} from './notify';
 import {ProviderError} from './types';
-import type {Env, Offer, Level, Ctx, Provider, Launched, LaunchPlan} from './types';
+import type {Env, Offer, Level, Ctx, Provider, Launched, LaunchPlan, Machine, Check} from './types';
+import {blockers, preflight} from './preflight';
 import {Unclear} from './providers/net';
 import {LIMITS, levelRank} from '../../shared/providers.js';
 
 type Watch = {id: string; user_id: string; key_id: string; provider: string; name: string; mode: string; state: string; spec: any; every_sec: number; max_launch: number; launched: number;
   renotify_min: number; max_price: number | null; starts_at: number | null; ends_at: number | null; checks: number; last_seen_at: number | null; last_notified_at: number | null; updated_at: number};
 type Run = {next: number; open: Map<string, {id: number; level: Level}>; found: Offer[]; err: string; errSince: number; fails: number; checks: number; lastAt: number; okAt: number;
-  savedAt: number; dirty: boolean; announced: boolean; holdUntil: number; tried: number; missLogged: number; reconAt: number};
+  savedAt: number; dirty: boolean; announced: boolean; holdUntil: number; tried: number; missLogged: number; missMsg: string; reconAt: number; refused: Map<string, number>; preAt: number; pre: {at: number; checks: Check[]} | null; preSig: string};
 type Key = {id: string; user_id: string; provider: string; label: string; key_enc: ArrayBuffer; meta: string; status: string};
 
-const RELOAD_MS = 20e3, SAVE_MS = 15e3, MISS_LOG_MS = 10 * 60e3, BACKOFF_MAX = 5 * 60e3, RECON_MS = 30e3, PENDING_STALE_MS = 150e3;
+const RELOAD_MS = 20e3, SAVE_MS = 15e3, MISS_LOG_MS = 10 * 60e3, BACKOFF_MAX = 30e3, RECON_MS = 30e3, PENDING_STALE_MS = 150e3;
+/* the account guard's list of machines is refreshed in the background this often while a launch watch is on, so a launch never waits for it */
+const GUARD_MS = 45e3;
+/* launch settings are checked when a launch watch starts and again this often */
+const PREFLIGHT_MS = 6 * 3600e3;
 const SETTLE_MS = [3000, 10000, 20000];
+const CAPACITY_WORDS = /capacity|not enough|no longer any instances|does not have the resources|could not be placed|insufficient|unavailable|out of stock|no (available|free)|taken|exhausted|went into ERROR|outside the chosen/i;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const sevOf = (k: ProviderError['kind']) => (k === 'capacity' ? 'info' : k === 'rate' || k === 'http' ? 'warn' : 'crit');
 
@@ -34,6 +40,12 @@ export class Watcher extends DurableObject<Env> {
   launchNext = 0;        // the earliest the next launch request may go (Lambda: one per 12 s)
   catalogPrice = new Map<string, number>();
   busy = false;
+  guardList: Machine[] | null = null;   // machines in the provider account, for the account guard
+  ignored = new Set<string>();           // machines terminated here a moment ago, still listed while they wind down
+  odd = new Map<string, number>();       // refusals that do not read like "no capacity", counted
+  authFails = 0;                         // refusals of the key in a row; one alone may be an edge hiccup
+  guardAt = 0;
+  guardWarnAt = 0;
 
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
@@ -48,7 +60,7 @@ export class Watcher extends DurableObject<Env> {
     }
     if (url.pathname === '/live') {
       const out: Record<string, unknown> = {};
-      for (const [id, r] of this.runs) out[id] = {next: r.next, lastAt: r.lastAt, okAt: r.okAt, checks: r.checks, found: r.found, err: r.err, errSince: r.errSince, holdUntil: r.holdUntil};
+      for (const [id, r] of this.runs) out[id] = {next: r.next, lastAt: r.lastAt, okAt: r.okAt, checks: r.checks, found: r.found, err: r.err, errSince: r.errSince, holdUntil: r.holdUntil, pre: r.pre};
       return Response.json({watches: out, keyNext: this.keyNext, at: Date.now()});
     }
     return new Response('not found', {status: 404});
@@ -81,12 +93,12 @@ export class Watcher extends DurableObject<Env> {
     for (const w of this.watches) if (!this.runs.has(w.id)) {
       const open = new Map<string, {id: number; level: Level}>();
       for (const o of (await db.prepare('SELECT id, target, region, level FROM windows WHERE watch_id = ? AND end_at IS NULL').bind(w.id).all<any>()).results) open.set(o.target + '|' + o.region, {id: o.id, level: o.level});
-      this.runs.set(w.id, {next: 0, open, found: [], err: '', errSince: 0, fails: 0, checks: w.checks, lastAt: 0, okAt: 0, savedAt: now, dirty: false, announced: open.size > 0, holdUntil: 0, tried: 0, missLogged: 0, reconAt: 0});
+      this.runs.set(w.id, {next: 0, open, found: [], err: '', errSince: 0, fails: 0, checks: w.checks, lastAt: 0, okAt: 0, savedAt: now, dirty: false, announced: open.size > 0, holdUntil: 0, tried: 0, missLogged: 0, missMsg: '', reconAt: 0, refused: new Map(), preAt: 0, pre: (w as any).status ? (JSON.parse((w as any).status || '{}').pre || null) : null, preSig: ''});
     }
     this.loadedAt = now;
   }
 
-  ctxFor(now: number): Ctx { return Object.assign({secret: this.secret, meta: JSON.parse(this.key!.meta || '{}'), fetch: (...a: Parameters<typeof fetch>) => fetch(...a), now}, {memo: new Map()}); }
+  ctxFor(now: number): Ctx { return Object.assign({secret: this.secret, meta: JSON.parse(this.key!.meta || '{}'), fetch: (...a: Parameters<typeof fetch>) => fetch(...a), now, timeout: 8000}, {memo: new Map()}); }
 
   /** one turn of the loop; returns when it wants to run again, or null to sleep until poked */
   async tick(now: number): Promise<number | null> {
@@ -112,11 +124,14 @@ export class Watcher extends DurableObject<Env> {
         r.checks++; r.lastAt = now; r.dirty = true;
         const lim = LIMITS[this.key.provider] || {min: 5};
         r.next = Math.max(now + Math.max(w.every_sec, lim.min) * 1000 * (0.95 + Math.random() * 0.1), r.holdUntil, this.keyNext);
-        if (r.fails) r.next = Math.max(r.next, now + Math.min(BACKOFF_MAX, 5e3 * 2 ** Math.min(r.fails, 6)));
+        if (r.fails) r.next = Math.max(r.next, now + Math.min(BACKOFF_MAX, 2e3 * 2 ** Math.min(r.fails, 6)));
         if (w.state !== 'on') this.runs.delete(w.id);
       }
+      // the provider's own rate-limit headers set the floor for every watch on this key (RunPod)
+      if (c.pace) for (const w of live) { const r = this.runs.get(w.id); if (r) r.next = Math.max(r.next, now + c.pace); }
       await this.save(now, false);
     }
+    await this.upkeep(P, now);
     const nexts = this.watches.filter(w => w.state === 'on').map(w => this.runs.get(w.id)?.next || now + 1000);
     return nexts.length ? Math.min(...nexts) : null;
   }
@@ -126,29 +141,37 @@ export class Watcher extends DurableObject<Env> {
     const s = w.spec, targets: string[] = s.configs || [], regions: string[] = s.regions || [];
     const min = levelRank(s.minLevel || 'low');
     const offers = await P.offers(c, w);
-    r.okAt = now;
+    r.okAt = now; this.authFails = 0;
     if (r.err) { await this.event(w, 'recovered', 'ok', 'Back in touch with the provider', r.err, now); r.err = ''; r.errSince = 0; r.fails = 0; }
     let found: Offer[] = [];
     if (offers) {
       found = offers.filter(o => targets.includes(o.config) && (!regions.length || regions.includes(o.region)) && levelRank(o.level) >= min && levelRank(o.level) > 0);
       if (w.max_price != null) found = found.filter(o => { const p = this.price(w, o.config); return p == null || p <= w.max_price!; });
       found.sort((a, b) => targets.indexOf(a.config) - targets.indexOf(b.config) || (regions.length ? regions.indexOf(a.region) - regions.indexOf(b.region) : levelRank(b.level) - levelRank(a.level)));
-      await this.windows(w, r, found, now);
     }
     r.found = found;
     if (found.length) { w.last_seen_at = now; }
+    if (w.mode === 'launch') {
+      // the launch goes first; the bookkeeping of what was seen waits until it is done
+      await this.hunt(P, c, w, r, offers, found, now);
+      if (offers && w.state === 'on') await this.windows(w, r, found, now);
+      return;
+    }
+    if (offers) await this.windows(w, r, found, now);
     if (w.mode === 'notify') {
       if (found.length && !r.announced) {
         r.announced = true;
         if (!w.last_notified_at || now - w.last_notified_at >= w.renotify_min * 60e3) await this.announce(w, found, now);
       }
       if (!found.length) r.announced = false;
-      return;
     }
-    // launch mode: settle anything left unclear first, then a provider without an availability signal is probed by the launch itself
+  }
+
+  /** launch mode: settle anything left unclear first, then a provider without an availability signal is probed by the launch itself */
+  async hunt(P: Provider, c: Ctx, w: Watch, r: Run, offers: Offer[] | null, found: Offer[], now: number) {
     await this.reconcile(P, c, w, r, now);
     if (w.state !== 'on') return;
-    if (w.launched >= w.max_launch) { await this.finish(w, 'done', await this.whyFull(w), now); return; }
+    if (w.launched >= w.max_launch) { const b = await this.blocked(w); await this.finish(w, b.final ? b.state : 'done', b.final ? b.text : `Started ${w.launched} of ${w.max_launch}.`, now); return; }
     const tries: Offer[] = offers ? found : this.probes(w);
     if (!tries.length || now < r.holdUntil) return;
     if (now < this.launchNext) { r.holdUntil = this.launchNext; return; }
@@ -177,12 +200,27 @@ export class Watcher extends DurableObject<Env> {
    *  4. Whatever cannot be settled stays "unknown", keeps counting against the limit and stops the watch until a person decides. */
   async launch(P: Provider, c: Ctx, w: Watch, r: Run, tries: Offer[], now: number) {
     const gap = (LIMITS[w.provider] || {}).launchGap || 0;
+    // the account guard: machines already in the provider account, whoever started them, count before the database is even asked
+    const held = await this.guard(P, c, w, now);
+    if (held.length >= w.max_launch) {
+      const list = held.map(m => `${m.name || m.extId} (${m.config}${m.region ? ', ' + m.region : ''}, ${m.status})`).join(', ');
+      await this.event(w, 'notice', 'warn', 'Not started: the account already has ' + (held.length === 1 ? 'this machine' : 'these machines'), list, now);
+      await this.finish(w, 'stopped', `The ${P.id} account already runs ${list}. The account guard does not start another. Terminate it, or turn the guard off in the watch settings, then resume.`, now, true);
+      return;
+    }
     // one candidate per check where the provider meters launches; otherwise up to three in a row
-    const list = gap ? [tries[r.tried++ % tries.length]] : tries.slice(0, 3);
+    // with a launch gap, the most preferred candidate goes first, unless it was just refused; then the next one gets the turn
+    const fresh = tries.filter(o => (r.refused.get(o.config + '|' + o.region) || 0) < now - 30e3);
+    const list = gap ? [(fresh[0] || tries[0])] : tries.slice(0, 3);
     for (const o of list) {
       const id = newId('mch'), base = String((w.spec.launch && w.spec.launch.name) || 'apicheck').slice(0, 40);
       const name = base + '-' + id.slice(-6), price = this.price(w, o.config);
-      if (!(await this.claim(w, id, o, name, price, now))) { await this.finish(w, 'done', await this.whyFull(w), now); return; }
+      if (!(await this.claim(w, id, o, name, price, now))) {
+        const b = await this.blocked(w);
+        if (b.final) await this.finish(w, b.state, b.text, now, b.state === 'stopped');
+        else r.holdUntil = Date.now() + 5e3;
+        return;
+      }
       if (gap) this.launchNext = Date.now() + gap;
       const plan = {config: o.config, region: o.region, name, spec: {...w.spec, watchId: w.id, launchId: id}};
       let res: Launched | null = null, pe: ProviderError | null = null;
@@ -190,7 +228,8 @@ export class Watcher extends DurableObject<Env> {
       catch (e) { pe = e instanceof ProviderError ? e : new ProviderError('http', (e as Error).message); }
       // an answer that does not say whether a machine was made is settled by looking for it, never by asking again
       const unsure = !!pe && (pe instanceof Unclear || (pe.kind === 'http' && (pe.status === 0 || pe.status >= 500)));
-      if (unsure && P.find) {
+      // a provider that already named the machine (Nebius: still creating) needs no search: it exists, and its fate is unclear
+      if (unsure && P.find && !(pe as any).extId) {
         const f = await this.settle(P, c, plan);
         if (f) { res = {extId: f.extId, name, detail: {status: f.status, settled: 'found by name after an unclear answer: ' + pe!.message}}; pe = null; }
       }
@@ -203,15 +242,26 @@ export class Watcher extends DurableObject<Env> {
       }
       if (unsure) {
         // a definite error answer, and the provider was asked by name: no machine exists, so this was a refusal
+        // the row stays findable: the next turns look it up by name again (reconcile), and the guard list is read afresh, in case the machine shows up late
         await this.env.DB.prepare("UPDATE launches SET state = 'failed', error = ?, updated_at = ? WHERE id = ?").bind(pe!.message + ' (checked by name: no machine was made)', Date.now(), id).run();
-        r.holdUntil = Date.now() + Math.max(15e3, pe!.retryAfter * 1000); this.keyNext = Math.max(this.keyNext, r.holdUntil);
+        this.guardList = null; r.reconAt = 0;
+        r.holdUntil = Date.now() + Math.max(30e3, pe!.retryAfter * 1000);
         await this.event(w, 'launch_failed', 'warn', 'Launch failed at the provider, will retry', pe!.message + ' No machine with the name ' + name + ' exists there.', now);
         return;
       }
       pe = pe!;
       if (pe.kind === 'capacity') {
         await this.env.DB.prepare('DELETE FROM launches WHERE id = ?').bind(id).run();
-        if (now - r.missLogged > MISS_LOG_MS) { r.missLogged = now; await this.event(w, 'notice', 'info', 'Seen, but taken before the launch went through', `${this.nm(w, o.config)} in ${o.region}: ${pe.message}`, now); }
+        const gone = (pe as any).terminated as string | undefined;
+        if (gone) {
+          // placed outside the chosen regions and terminated at once: the guard must not count it, and the hunt pauses briefly
+          this.ignored.add(gone); r.holdUntil = Date.now() + 30e3;
+          await this.event(w, 'notice', 'warn', 'Placed outside the chosen regions, terminated', pe.message, now);
+          return;
+        }
+        r.refused.set(o.config + '|' + o.region, now);
+        if (pe.message !== r.missMsg || now - r.missLogged > MISS_LOG_MS) { r.missLogged = now; r.missMsg = pe.message; await this.event(w, 'notice', 'info', 'Seen, but taken before the launch went through', `${this.nm(w, o.config)} in ${o.region}: ${pe.message}`, now); }
+        await this.oddRefusal(w, pe.message, now);
         continue;
       }
       await this.env.DB.prepare("UPDATE launches SET state = 'failed', error = ?, updated_at = ? WHERE id = ?").bind(pe.message, Date.now(), id).run();
@@ -223,25 +273,89 @@ export class Watcher extends DurableObject<Env> {
     }
   }
 
+  /** machines in the provider account that stop this watch from launching; the list is kept warm by upkeep() */
+  async guard(P: Provider, c: Ctx, w: Watch, now: number): Promise<Machine[]> {
+    if (!P.active) return [];
+    if (!this.guardList || now - this.guardAt > 2 * GUARD_MS) {
+      try { this.guardList = await P.active(c, w.spec); this.guardAt = now; }
+      catch (e) {
+        // the list could not be read: the launch goes ahead, the database limit still holds
+        if (now - this.guardWarnAt > MISS_LOG_MS) { this.guardWarnAt = now; await this.event(w, 'notice', 'warn', 'Could not list the machines in the account', (e as Error).message, now); }
+        return [];
+      }
+    }
+    return blockers(this.guardList.filter(m => !this.ignored.has(m.extId)), w);
+  }
+
+  /** between checks: keep the guard's list warm, and check each launch watch's settings when it starts and every few hours */
+  async upkeep(P: Provider, now: number) {
+    const hunting = this.watches.filter(w => w.state === 'on' && w.mode === 'launch' && (!w.starts_at || w.starts_at <= now));
+    if (!hunting.length) return;
+    const c = this.ctxFor(now);
+    if (P.active && now - this.guardAt > GUARD_MS) { try { this.guardList = await P.active(c, hunting[0].spec); this.guardAt = now; } catch { /* the launch reads it again if needed */ } }
+    // one preflight per turn at most, and never while capacity is in sight
+    const w = hunting.find(x => { const r = this.runs.get(x.id); return r && !r.found.length && now - r.preAt > PREFLIGHT_MS; });
+    if (!w) return;
+    const r = this.runs.get(w.id)!;
+    r.preAt = now;
+    const checks = await preflight(P, c, w).catch(e => [{level: 'warn', text: 'Could not run the check: ' + (e as Error).message}] as Check[]);
+    r.pre = {at: now, checks}; r.dirty = true;
+    const fails = checks.filter(x => x.level === 'fail'), sig = fails.map(x => x.text).join('|');
+    if (sig && sig !== r.preSig) {
+      await this.event(w, 'preflight', 'crit', 'Launch settings would fail', fails.map(x => x.text).join('\n'), now);
+      await tell(this.env, w.user_id, w.id, 'error', `API Check: "${w.name}" could not start a machine as set up`, `The launch check of the watch "${w.name}" found ${fails.length === 1 ? 'a problem' : fails.length + ' problems'}. If capacity appears now, the launch would fail:\n\n${fails.map(x => '- ' + x.text).join('\n')}\n\nThe watch keeps hunting. Fix the settings and press "Check launch settings" on the watch page.${appLink(this.env, 'watch/' + w.id) ? '\n\n' + appLink(this.env, 'watch/' + w.id) : ''}`);
+    } else if (!sig && r.preSig) await this.event(w, 'preflight', 'ok', 'Launch settings check out again', '', now);
+    r.preSig = sig;
+    await this.save(now, true);
+  }
+
+  /** a refusal counted as "no capacity" that does not read like one may be a fault in the settings (RunPod answers both with 400):
+   *  when the same words come back three times, the person hears about it once, and the hunt goes on */
+  async oddRefusal(w: Watch, msg: string, now: number) {
+    if (CAPACITY_WORDS.test(msg)) return;
+    const n = (this.odd.get(w.id + '|' + msg) || 0) + 1;
+    this.odd.set(w.id + '|' + msg, n);
+    if (n !== 3) return;
+    await this.event(w, 'launch_failed', 'warn', 'The provider keeps refusing the launch', msg, now);
+    await tell(this.env, w.user_id, w.id, 'error', `API Check: "${w.name}" keeps being refused`, `Three launches of the watch "${w.name}" were refused with the same answer, which does not read like "no capacity":\n\n${msg}\n\nIf it is about the settings, fix them; "Check launch settings" on the watch page may tell more. The watch keeps hunting.${appLink(this.env, 'watch/' + w.id) ? '\n\n' + appLink(this.env, 'watch/' + w.id) : ''}`);
+  }
+
   /** the atomic claim; true when this launch may go ahead */
   async claim(w: Watch, id: string, o: Offer, name: string, price: number | null, now: number): Promise<boolean> {
-    const g = this.group(w), cap = Math.max(1, w.max_launch);
-    const r = await this.env.DB.prepare(`INSERT INTO launches (id, user_id, watch_id, key_id, provider, target, region, name, state, price, currency, created_at, updated_at)
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?
+    // three limits, all counted on the launch rows themselves, so a deleted or edited watch never frees a place:
+    // this watch; this provider for this person (one machine per provider, whichever watch or key asks); and the shared group
+    const g = this.group(w), cap = Math.max(1, w.max_launch), L = "('pending', 'created', 'unknown')";
+    const r = await this.env.DB.prepare(`INSERT INTO launches (id, user_id, watch_id, key_id, provider, target, region, name, state, price, currency, grp, created_at, updated_at)
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?
       WHERE EXISTS (SELECT 1 FROM watches WHERE id = ? AND state = 'on' AND mode = 'launch')
-        AND (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state IN ('pending', 'created', 'unknown')) < ?
-        AND (? = '' OR (SELECT COUNT(*) FROM launches l JOIN watches x ON x.id = l.watch_id WHERE x.user_id = ? AND x.mode = 'launch' AND json_extract(x.spec, '$.group') = ? AND l.state IN ('pending', 'created', 'unknown')) < ?)`)
-      .bind(id, w.user_id, w.id, w.key_id, w.provider, o.config, o.region, name, price, (w.spec.currency || 'USD'), now, now, w.id, w.id, cap, g, w.user_id, g, cap).run();
+        AND (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state IN ${L}) < ?
+        AND (SELECT COUNT(*) FROM launches WHERE user_id = ? AND provider = ? AND state IN ${L}) < ?
+        AND (? = '' OR (SELECT COUNT(*) FROM launches WHERE user_id = ? AND grp = ? AND state IN ${L})
+             < (SELECT COALESCE(MIN(max_launch), ?) FROM watches WHERE user_id = ? AND mode = 'launch' AND json_extract(spec, '$.group') = ?))`)
+      .bind(id, w.user_id, w.id, w.key_id, w.provider, o.config, o.region, name, price, (w.spec.currency || 'USD'), g || null, now, now,
+        w.id, w.id, cap, w.user_id, w.provider, cap, g, w.user_id, g, cap, w.user_id, g).run();
     return !!r.meta.changes;
   }
   group(w: Watch): string { return typeof w.spec.group === 'string' ? w.spec.group : ''; }
-  async whyFull(w: Watch): Promise<string> {
-    const n = await this.env.DB.prepare("SELECT state, COUNT(*) AS n FROM launches WHERE watch_id = ? AND state IN ('pending', 'created', 'unknown') GROUP BY state").bind(w.id).all<any>();
-    const by: Record<string, number> = {}; for (const x of n.results) by[x.state] = x.n;
-    if (by.unknown) return `A launch is still unconfirmed (${by.unknown}). It counts as a machine until you delete it on the Machines page.`;
-    if ((by.created || 0) + (by.pending || 0) >= w.max_launch) return `Started ${by.created || 0} of ${w.max_launch} machine${w.max_launch === 1 ? '' : 's'}.`;
-    const g = this.group(w);
-    return g ? `The group "${g}" already has its machine${w.max_launch === 1 ? '' : 's'}, started by another watch.` : 'The watch is no longer on.';
+
+  /** why a claim was refused. final = a machine exists or is unconfirmed, so the watch is through; otherwise only launches still in flight
+   *  stand in the way (another watch of the group, an earlier life of this object) and the watch waits a few seconds and tries again */
+  async blocked(w: Watch): Promise<{final: boolean; state: 'done' | 'stopped'; text: string}> {
+    const db = this.env.DB, g = this.group(w), cap = Math.max(1, w.max_launch);
+    const row = await db.prepare(`SELECT
+        (SELECT state FROM watches WHERE id = ?) AS ws,
+        (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state = 'created') AS wc,
+        (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state = 'unknown') AS wu,
+        (SELECT COUNT(*) FROM launches WHERE user_id = ? AND provider = ? AND state IN ('created', 'unknown')) AS pc,
+        (SELECT COUNT(*) FROM launches WHERE user_id = ? AND grp = ? AND state IN ('created', 'unknown')) AS gc,
+        (SELECT COALESCE(MIN(max_launch), ?) FROM watches WHERE user_id = ? AND mode = 'launch' AND json_extract(spec, '$.group') = ?) AS gcap`)
+      .bind(w.id, w.id, w.id, w.user_id, w.provider, w.user_id, g, cap, w.user_id, g).first<any>();
+    if (row.ws !== 'on') return {final: true, state: 'done', text: 'The watch is no longer on.'};
+    if (row.wu) return {final: true, state: 'stopped', text: `A launch is still unconfirmed. It counts as a machine until you delete it on the Machines page.`};
+    if (row.wc >= cap) return {final: true, state: 'done', text: `Started ${row.wc} of ${cap} machine${cap === 1 ? '' : 's'}.`};
+    if (g && row.gc >= row.gcap) return {final: true, state: 'done', text: `The group "${g}" already has its machine${row.gcap === 1 ? '' : 's'}, started by another watch.`};
+    if (row.pc >= cap) return {final: true, state: 'stopped', text: `API Check already started a machine at ${w.provider} for you (or one is unconfirmed): one machine per provider. When it is terminated, refresh it on the Machines page, then resume.`};
+    return {final: false, state: 'done', text: 'Another launch is in flight; trying again in a few seconds.'};
   }
 
   /** ask by name, three times over about half a minute: providers can be slow to list a machine they have just accepted */
@@ -256,6 +370,7 @@ export class Watcher extends DurableObject<Env> {
   /** a machine exists: record it, count it, tell the person, and stop the group's other launch watches */
   async started(P: Provider, w: Watch, o: Offer, id: string, name: string, price: number | null, res: Launched, now: number): Promise<boolean> {
     const db = this.env.DB;
+    this.guardList = null;
     await db.batch([
       db.prepare("UPDATE launches SET state = 'created', ext_id = ?, price = COALESCE(?, price), currency = COALESCE(?, currency), detail = ?, error = NULL, updated_at = ? WHERE id = ?").bind(res.extId, res.price ?? null, res.currency ?? null, JSON.stringify(res.detail || {}), Date.now(), id),
       db.prepare("UPDATE watches SET launched = (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state IN ('created', 'unknown')), updated_at = ? WHERE id = ?").bind(w.id, Date.now(), w.id)
@@ -274,8 +389,8 @@ export class Watcher extends DurableObject<Env> {
   /** the other launch watches of a group whose machines are all started stop now, on every key; their own claims would refuse anyway */
   async stopGroup(w: Watch, g: string, now: number) {
     const db = this.env.DB;
-    const used = await db.prepare("SELECT COUNT(*) AS n FROM launches l JOIN watches x ON x.id = l.watch_id WHERE x.user_id = ? AND x.mode = 'launch' AND json_extract(x.spec, '$.group') = ? AND l.state IN ('pending', 'created', 'unknown')").bind(w.user_id, g).first<number>('n');
-    if ((used || 0) < w.max_launch) return;
+    const used = await db.prepare("SELECT (SELECT COUNT(*) FROM launches WHERE user_id = ? AND grp = ? AND state IN ('created', 'unknown')) AS n, (SELECT COALESCE(MIN(max_launch), ?) FROM watches WHERE user_id = ? AND mode = 'launch' AND json_extract(spec, '$.group') = ?) AS cap").bind(w.user_id, g, w.max_launch, w.user_id, g).first<any>();
+    if (used.n < used.cap) return;
     const others = (await db.prepare("SELECT id, key_id FROM watches WHERE user_id = ? AND mode = 'launch' AND state = 'on' AND id <> ? AND json_extract(spec, '$.group') = ?").bind(w.user_id, w.id, g).all<any>()).results;
     if (!others.length) return;
     const why = `The group "${g}" has its machine: "${w.name}" started it.`;
@@ -292,7 +407,7 @@ export class Watcher extends DurableObject<Env> {
     if (now - r.reconAt < RECON_MS) return;
     r.reconAt = now;
     const db = this.env.DB;
-    const rows = (await db.prepare("SELECT id, target, region, name, state FROM launches WHERE watch_id = ? AND ((state = 'pending' AND created_at < ?) OR (state = 'unknown' AND ext_id IS NULL))").bind(w.id, now - PENDING_STALE_MS).all<any>()).results;
+    const rows = (await db.prepare("SELECT id, target, region, name, state FROM launches WHERE watch_id = ? AND ((state = 'pending' AND created_at < ?) OR (state = 'unknown' AND ext_id IS NULL) OR (state = 'failed' AND error LIKE '%(checked by name%' AND created_at > ?))").bind(w.id, now - PENDING_STALE_MS, now - 15 * 60e3).all<any>()).results;
     for (const l of rows) {
       const plan = {config: l.target, region: l.region, name: l.name, spec: {...w.spec, watchId: w.id, launchId: l.id}};
       let f: {extId: string; status?: string} | null = null, asked = false;
@@ -316,6 +431,11 @@ export class Watcher extends DurableObject<Env> {
     const pe = e instanceof ProviderError ? e : new ProviderError('http', (e as Error).message || 'Unknown error');
     r.fails++;
     if (pe.kind === 'rate' && pe.retryAfter) this.keyNext = now + pe.retryAfter * 1000;
+    if (pe.kind === 'auth' && ++this.authFails < 3) {
+      // a single refusal can be an edge or proxy hiccup; the key is only given up after three in a row
+      if (!r.err) { r.err = pe.message; r.errSince = now; await this.event(w, 'error', 'warn', 'Could not check: the key was refused once', pe.message, now); }
+      return;
+    }
     if (pe.kind === 'auth') {
       await this.env.DB.prepare("UPDATE keys SET status = 'error', last_error = ?, error_at = ? WHERE id = ?").bind(pe.message, now, w.key_id).run();
       if (this.key) this.key.status = 'error';
@@ -369,7 +489,7 @@ export class Watcher extends DurableObject<Env> {
     for (const w of this.watches) {
       const r = this.runs.get(w.id); if (!r || (!force && !r.dirty) || (!force && now - r.savedAt < SAVE_MS && !this.changed(r))) continue;
       st.push(this.env.DB.prepare('UPDATE watches SET checks = ?, last_check_at = ?, last_ok_at = COALESCE(?, last_ok_at), last_seen_at = ?, last_error = ?, status = ? WHERE id = ?')
-        .bind(r.checks, r.lastAt || null, r.okAt || null, w.last_seen_at, r.err || null, JSON.stringify({found: r.found.slice(0, 20), err: r.err, errSince: r.errSince, next: r.next}), w.id));
+        .bind(r.checks, r.lastAt || null, r.okAt || null, w.last_seen_at, r.err || null, JSON.stringify({found: r.found.slice(0, 20), err: r.err, errSince: r.errSince, next: r.next, pre: r.pre}), w.id));
       r.savedAt = now; r.dirty = false; (r as any).sig = this.sig(r);
     }
     if (st.length) await this.env.DB.batch(st);

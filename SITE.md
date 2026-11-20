@@ -36,6 +36,16 @@ Practices adopted: separate "seen" from "launched"; write the launch before call
 
 ## Changelog
 
+- 20.11.2026 — v1.3 (before the hunt from 23.11): account guard (no launch while the provider account already runs a machine of the hunted kind or one API Check started under this name; list kept warm every 45 s);
+  read-only launch check (button in the form and on the watch page; automatic when a launch watch starts and every 6 h, email on failure);
+  polling minimums Lambda 2 s, RunPod 2 s with pacing from RunPod's RateLimit header, Nebius 5 s; backoff after errors capped at 60 s; the launch runs before any bookkeeping;
+  RunPod: one request offers every allowed data center, a pod placed outside them is terminated at once, default image gets minCudaVersion 12.8;
+  Nebius: RESOURCE_EXHAUSTED without a quota failure = capacity (was: stop as quota), subnet cached; Europe quick pick for regions; group "main" by default for launch watches.
+  After an independent review: limits counted on launch rows (per watch, per person and provider, per group; migration 0002 adds launches.grp);
+  a refusal caused only by an in-flight launch waits instead of finishing; Nebius failed operations are definite answers, find() ignores DELETING/ERROR,
+  failed VMs deleted with retries, operation wait 240 s; a started machine counts until "Read status" confirms it is gone (state ended);
+  "Nothing was started" button for unconfirmed launches; late machines after a 5xx are looked up again; RunPod 403 = next candidate;
+  three refusals with odd wording = one email; three auth refusals in a row before a key is given up; polls time out after 8 s.
 - 20.11.2026 — v1.2: Hyperstack added (flavors with stock_available plus /core/stocks; launch with the region's environment, key and image; ERROR right after acceptance = deleted and treated as capacity).
   Launch safety rebuilt: atomic claim in D1 before every launch (watch limit and shared group limit, pending/created/unknown all count); unique machine name per attempt;
   an unclear answer (timeout, network, 5xx) is settled by looking the machine up by name (Lambda, UpCloud, Nebius, RunPod, Hyperstack) and never by asking again;

@@ -15,8 +15,10 @@ export async function call(c: Ctx, url: string, init: RequestInit & {timeout?: n
   const run = (async () => {
     let res: Response;
     try {
-      res = await c.fetch(url, {...init, headers: {'user-agent': UA, accept: 'application/json', ...(init.body && typeof init.body === 'string' ? {'content-type': 'application/json'} : {}), ...(init.headers as Record<string, string> || {})}, signal: AbortSignal.timeout(init.timeout || 20000)});
+      res = await c.fetch(url, {...init, headers: {'user-agent': UA, accept: 'application/json', ...(init.body && typeof init.body === 'string' ? {'content-type': 'application/json'} : {}), ...(init.headers as Record<string, string> || {})}, signal: AbortSignal.timeout(init.timeout || ((init.method || 'GET') === 'GET' && c.timeout ? c.timeout : 20000))});
     } catch (e) { throw new Unclear('No answer from the provider (' + ((e as Error).name === 'TimeoutError' ? 'timed out' : 'network error') + ').'); }
+    const rl = res.headers.get('ratelimit');
+    if (rl) { const ms = paceOf(rl); if (ms) c.pace = Math.max(c.pace || 0, ms); }
     const text = await res.text();
     let body: any = null; try { body = text ? JSON.parse(text) : null; } catch { body = null; }
     if (res.ok) return body;
@@ -31,6 +33,16 @@ export async function call(c: Ctx, url: string, init: RequestInit & {timeout?: n
 export async function prep<T>(p: Promise<T>): Promise<T> {
   try { return await p; }
   catch (e) { const pe = e instanceof ProviderError ? e : new ProviderError('http', (e as Error).message); throw new ProviderError(pe.kind, 'Before the launch: ' + pe.message, 1, pe.retryAfter); }
+}
+/** IETF RateLimit header ("minute";r=57;t=12, "hour";r=2800;t=1812, "day";r=49500;t=45012): the interval between checks that keeps every window
+ *  from running dry before it resets, with a few requests held back in each for a launch and its follow-up */
+export function paceOf(h: string): number {
+  let ms = 0;
+  for (const m of h.matchAll(/"?([A-Za-z0-9_-]+)"?\s*;\s*r=(\d+)\s*;\s*t=(\d+)/g)) {
+    const r = Number(m[2]), t = Number(m[3]) * 1000, keep = /minute/i.test(m[1]) ? 4 : 15;
+    ms = Math.max(ms, r <= keep ? t : t / (r - keep));
+  }
+  return Math.round(ms);
 }
 export function defaultKind(status: number): FailKind {
   if (status === 401 || status === 403) return 'auth';

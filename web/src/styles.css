@@ -491,3 +491,15 @@ form .d-f { position: sticky; bottom: 0; margin: 6px -24px -24px; padding: 14px 
   .track i, .lv .bars b { forced-color-adjust: none; }
   .seg button[aria-pressed=true], .chip[aria-pressed=true], .nav a[aria-current] { outline: 2px solid CanvasText; }
 }
+
+/* launch check */
+.pre { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding-top: 4px; }
+.prelist { border: 1px solid var(--rule-2); border-radius: 10px; padding: 12px 16px; background: var(--surface); }
+.prelist.bad { border-color: color-mix(in oklab, var(--crit) 45%, var(--rule-2)); }
+.prelist p { margin: 0 0 8px; }
+.prelist ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.prelist li { position: relative; padding-left: 22px; line-height: 1.45; max-width: 75ch; }
+.prelist li::before { content: ""; position: absolute; left: 2px; top: .45em; width: 9px; height: 9px; border-radius: 50%; background: var(--go); }
+.prelist li.pl-warn::before { background: var(--warn); }
+.prelist li.pl-fail::before { background: var(--crit); border-radius: 2px; }
+.prelist li.pl-fail { font-weight: 550; }

@@ -3,17 +3,22 @@
 // Launch: POST /instance-operations/launch, at most one request every 12 seconds; "insufficient-capacity" means keep trying.
 // Limits: about one request per second in general.
 import {ProviderError} from '../types';
-import type {Provider, Ctx, Catalog, Config, Offer, Option, LaunchPlan} from '../types';
+import type {Provider, Ctx, Catalog, Config, Offer, Option, LaunchPlan, Check, Machine} from '../types';
 import {call, round2, gib2gb} from './net';
 import type {Classify} from './net';
 
 const BASE = 'https://cloud.lambda.com/api/v1';
+const GONE = new Set(['terminated', 'terminating', 'preempted']);
 const KIND: Record<string, ProviderError['kind']> = {
   'instance-operations/launch/insufficient-capacity': 'capacity', 'global/rate-limited': 'rate', 'global/invalid-api-key': 'auth',
   'global/account-inactive': 'auth', 'global/quota-exceeded': 'quota', 'global/invalid-parameters': 'invalid', 'global/object-does-not-exist': 'invalid',
   'instance-operations/launch/file-system-in-wrong-region': 'invalid', 'instance-operations/launch/file-system-not-in-vpc': 'invalid', 'global/invalid-address': 'auth'
 };
-const classify: Classify = (status, body) => { const code = body && body.error && body.error.code; return (code && KIND[code]) || (String(code || '').startsWith('provider/') ? 'http' : null); };
+const classify: Classify = (status, body) => {
+  const code = body && body.error && body.error.code;
+  if (!code && (status === 401 || status === 403)) return 'http';   // no Lambda error body: an edge or proxy answered, not the API
+  return (code && KIND[code]) || (String(code || '').startsWith('provider/') ? 'http' : null);
+};
 const get = (c: Ctx, path: string, memo = false) => call(c, BASE + path, {headers: {authorization: 'Bearer ' + c.secret.trim()}, memo}, classify).then(r => r && r.data);
 /* a list the form can live without: a refusal or a rate limit leaves it empty and says so, instead of failing the whole catalogue */
 async function soft<T>(notes: string[], what: string, fn: () => Promise<T[]>): Promise<T[]> {
@@ -90,6 +95,50 @@ export const lambda: Provider = {
     const list = await get(c, '/instances');
     const i = (Array.isArray(list) ? list : []).find((x: any) => x && x.name === p.name);
     return i ? {extId: i.id, status: i.status} : null;
+  },
+  async active(c) {
+    const list = await get(c, '/instances');
+    return (Array.isArray(list) ? list : []).filter((i: any) => i && !GONE.has(i.status)).map((i: any): Machine => ({extId: i.id, name: i.name || '', config: i.instance_type && i.instance_type.name, region: i.region && i.region.name, status: i.status}));
+  },
+  async preflight(c, spec) {
+    // one request a second is Lambda's general limit, so the reads go one after another
+    const out: Check[] = [], s = spec.launch || {}, regions: string[] = spec.regions || [], pause = () => new Promise(r => setTimeout(r, (c as any).fast ? 0 : 1100));
+    const types = (await get(c, '/instance-types')) || {};
+    for (const id of spec.configs || []) {
+      const t = types[id];
+      if (!t) out.push({level: 'fail', text: `Lambda does not offer ${id} any more.`});
+      else out.push({level: 'ok', text: `${t.instance_type.description}: $${round2(t.instance_type.price_cents_per_hour / 100)}/h${t.instance_type.architecture === 'arm64' ? ', Arm' : ''}.`});
+    }
+    await pause();
+    const keys: any[] = (await get(c, '/ssh-keys')) || [];
+    if (!s.ssh_key) out.push({level: 'fail', text: 'No SSH key is chosen; Lambda refuses a launch without exactly one.'});
+    else if (!keys.some(k => k.name === s.ssh_key)) out.push({level: 'fail', text: `The SSH key "${s.ssh_key}" is not in the account any more.`});
+    else out.push({level: 'ok', text: `SSH key "${s.ssh_key}" is in the account.`});
+    if (s.image) {
+      await pause();
+      const images: any[] = (await get(c, '/images')) || [], arch = new Set((spec.configs || []).map((id: string) => types[id] && types[id].instance_type.architecture).filter(Boolean));
+      const has = (r: string) => images.some(i => i.family === s.image && (!r || (i.region && i.region.name === r)) && (!arch.size || arch.has(i.architecture)));
+      const missing = regions.filter(r => !has(r));
+      if (!has('')) out.push({level: 'fail', text: `The image family "${s.image}" does not exist for this machine's architecture.`});
+      else if (missing.length) out.push({level: 'fail', text: `The image family "${s.image}" is not offered in ${missing.join(', ')}; a launch there would be refused. Choose the default image or drop those regions.`});
+      else out.push({level: 'ok', text: `Image family "${s.image}" is offered in ${regions.length ? 'every chosen region' : 'the account'}.`});
+    } else out.push({level: 'ok', text: 'Image: the latest Lambda Stack (Lambda\'s default).'});
+    if (s.filesystem) {
+      await pause();
+      const f = ((await get(c, '/filesystems')) || []).find((x: any) => x.name === s.filesystem);
+      if (!f) out.push({level: 'fail', text: `The filesystem "${s.filesystem}" does not exist any more.`});
+      else if (regions.length && !regions.includes(f.region && f.region.name)) out.push({level: 'fail', text: `The filesystem "${s.filesystem}" is in ${f.region && f.region.name}, outside the chosen regions.`});
+      else out.push({level: 'ok', text: `Filesystem "${s.filesystem}" in ${f.region && f.region.name}; the watch is limited to that region.`});
+    }
+    if (s.firewall) {
+      await pause();
+      const f = ((await get(c, '/firewall-rulesets')) || []).find((x: any) => x.id === s.firewall);
+      if (!f) out.push({level: 'fail', text: 'The chosen firewall ruleset does not exist any more.'});
+      else out.push({level: 'ok', text: `Firewall ruleset "${f.name}" in ${f.region && (f.region.name || f.region)}.`});
+    }
+    out.push({level: 'warn', text: 'Lambda does not say how many instances an account may run. New accounts are limited until invoices are paid; if this one has never paid an invoice, ask Lambda support to confirm an 8-GPU launch.'});
+    await pause();
+    return out;
   },
   async instance(c, extId) {
     const i = await get(c, '/instances/' + encodeURIComponent(extId));

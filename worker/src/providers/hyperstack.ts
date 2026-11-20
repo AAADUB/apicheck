@@ -8,7 +8,7 @@
 //   Running out of capacity is not documented as an error code, so a 400 that is not plainly about the request, the balance or a limit is treated as capacity.
 // Limits: 500 requests per minute per source IP, across all endpoints.
 import {ProviderError} from '../types';
-import type {Provider, Ctx, Catalog, Config, Offer, Option, LaunchPlan} from '../types';
+import type {Provider, Ctx, Catalog, Config, Offer, Option, LaunchPlan, Check, Machine} from '../types';
 import {call, round2, prep} from './net';
 import type {Classify} from './net';
 
@@ -184,6 +184,22 @@ export const hyperstack: Provider = {
     const r = await get(c, '/core/virtual-machines?search=' + encodeURIComponent(name) + '&page=1&pageSize=50');
     const vm = ((r && r.instances) || []).find((x: any) => x && x.name === name);
     return vm && !/^ERROR$/i.test(String(vm.status || '')) ? {extId: String(vm.id), status: vm.status} : null;
+  },
+  async active(c) {
+    return (await pages(c, '/core/virtual-machines', 'instances')).filter((i: any) => i && !/^(DELETED|DELETING)$/i.test(String(i.status || ''))).map((i: any): Machine => ({extId: String(i.id), name: i.name || '', config: (i.flavor && i.flavor.name) || '', region: (i.environment && i.environment.region) || '', status: String(i.status || '')}));
+  },
+  async preflight(c, spec) {
+    const out: Check[] = [], s = spec.launch || {}, ek = await envsAndKeys(c, true), fl = flavorsOf(await get(c, '/core/flavors'));
+    const regions: string[] = spec.regions && spec.regions.length ? spec.regions : [...new Set(fl.filter(f => (spec.configs || []).includes(f.name)).map(f => f.region_name))];
+    for (const region of regions) {
+      const env = (s.environment && ek.envs.find((e: any) => e.name === s.environment && regionOfEnv(e) === region)) || ek.envs.find((e: any) => regionOfEnv(e) === region && ek.keys.some((k: any) => envOfKey(k) === e.name));
+      if (!env) { out.push({level: 'fail', text: `${region}: no environment with an SSH key; a launch there is skipped.`}); continue; }
+      const key = (s.keypair && ek.keys.find((k: any) => k.name === s.keypair && envOfKey(k) === env.name)) || ek.keys.find((k: any) => envOfKey(k) === env.name);
+      const image = pickImage(flatImages(await get(c, '/core/images?region=' + encodeURIComponent(region))), region, s.image);
+      out.push(key && image ? {level: 'ok', text: `${region}: environment ${env.name}, key ${key.name}, image ${image}.`} : {level: 'fail', text: `${region}: ${key ? 'no Ubuntu image' : 'no SSH key in ' + env.name}.`});
+    }
+    try { const b = await get(c, '/billing/user-credit/credit'), d = b && b.data; if (d && d.can_create_instance === false) out.push({level: 'fail', text: 'Hyperstack says this account cannot create machines now: top up the credit.'}); else if (d && d.credit != null) out.push({level: 'ok', text: `Credit $${round2(Number(d.credit))}.`}); } catch { /* optional */ }
+    return out;
   },
   async instance(c, extId) {
     const x = await get(c, '/core/virtual-machines/' + encodeURIComponent(extId)), i = x && (x.instance || x);

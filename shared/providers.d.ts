@@ -1,5 +1,7 @@
 export const LIMITS: Record<string, {min: number; def: number; launchGap: number}>;
 export const EVERY_MAX: number;
+export const EUROPE: Record<string, RegExp>;
+export function inEurope(provider: string, region: string): boolean;
 export const PARAMS: Record<string, {id: string; label: string; choices: [string | number, string][]; def: string | number}[]>;
 export const PROVIDERS: Record<string, any>;
 export const DEV_PROVIDER: Record<string, any>;

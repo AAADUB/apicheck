@@ -1,6 +1,6 @@
 /* API Check interface. Plain JavaScript, no framework: the screens are strings, events are delegated, the server is web/src/api.js. */
 import {Api} from './api.js';
-import {PROVIDERS, DEV_PROVIDER, LIMITS, PARAMS, LEVEL_NAME, levelRank, EVERY_MAX} from '../../shared/providers.js';
+import {PROVIDERS, DEV_PROVIDER, LIMITS, PARAMS, LEVEL_NAME, levelRank, EVERY_MAX, inEurope} from '../../shared/providers.js';
 
 const api = new Api();
 const $ = (s, r = document) => r.querySelector(s);
@@ -31,7 +31,7 @@ const API_ERR = {
   regions: 'Choose at least one region.', mode: 'Choose what happens when capacity is found.', notify_unsupported: 'This provider can only be watched by trying to launch.', params: 'Check the settings above the list.',
   launch_field: 'Check the launch settings.', every: 'Choose a check interval within the provider’s limits.', max_launch: 'Start from 1 to 10 machines.', renotify: 'Choose a quiet time from 1 minute to 24 hours.',
   max_price: 'The price cap must be above zero.', dates: 'Check the start and end: the end must be in the future and after the start.', name: 'Give the watch a name.', key_broken: 'The key of this watch was refused by the provider. Replace it on the Keys page first.',
-  watch_limit: 'You already have 60 watches. Delete one to add another.', state: 'That is not a state a watch can have.', launch_done: 'This watch has started all the machines it was allowed to. Raise the number in its settings first.', launch_unknown: 'A launch of this watch was never confirmed. Check the provider console; if no machine was started, delete that launch on the Machines page, then resume.', group: 'A group name uses letters, digits, spaces, dots, dashes and underscores.',
+  watch_limit: 'You already have 60 watches. Delete one to add another.', state: 'That is not a state a watch can have.', launch_done: 'This watch has started all the machines it was allowed to. Raise the number in its settings first.', still_running: 'This machine still counts as running. Press “Read status” after terminating it; once the provider confirms it is gone, it no longer counts.', launch_unknown: 'A launch of this watch was never confirmed. Check the provider console; if no machine was started, delete that launch on the Machines page, then resume.', group: 'A group name uses letters, digits, spaces, dots, dashes and underscores.',
   not_running: 'The watch is paused or finished. Resume it first.', no_machine: 'This launch has no machine to read.', mail_off: 'Email is not set up on this server yet.', send_failed: 'The message could not be sent.'
 };
 const apiMsg = e => (API_ERR[e && e.code] || API_ERR.server) + (e && e.detail ? ' ' + e.detail : '');
@@ -66,7 +66,7 @@ const ICON = {
   machines: '<rect x="3.5" y="4" width="17" height="6.5" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="6.5" rx="1.5"/><path d="M7 7.25h.01M7 16.75h.01M11 7.25h6M11 16.75h6"/>', activity: '<path d="M3 12h4l2.5-6 4 12 2.5-6H21"/>',
   keys: '<circle cx="8" cy="15" r="4"/><path d="m11 12 8-8M16 7l2.5 2.5M14 9l2 2"/>', users: '<circle cx="9" cy="8.5" r="3"/><path d="M3 19.5c.5-3 2.8-4.7 6-4.7s5.5 1.7 6 4.7"/><path d="M15.5 5.8a3 3 0 0 1 0 5.4M17.5 15c2 .6 3.2 2.1 3.5 4.5"/>',
   settings: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>', plus: '<path d="M12 5v14M5 12h14"/>', x: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
-  play: '<path d="M8 5.5v13l10.5-6.5z"/>', pause: '<path d="M8.5 5.5v13M15.5 5.5v13"/>', sync: '<path d="M20 11a8 8 0 0 0-14.5-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.5 4.5L20 16M20 20v-4h-4"/>',
+  play: '<path d="M8 5.5v13l10.5-6.5z"/>', check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>', europe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.5 3.5 5.5 3.5 8.5s-1 6-3.5 8.5c-2.5-2.5-3.5-5.5-3.5-8.5s1-6 3.5-8.5z"/>', pause: '<path d="M8.5 5.5v13M15.5 5.5v13"/>', sync: '<path d="M20 11a8 8 0 0 0-14.5-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.5 4.5L20 16M20 20v-4h-4"/>',
   up: '<path d="m6 15 6-6 6 6"/>', down: '<path d="m6 9 6 6 6-6"/>', theme: '<circle cx="12" cy="12" r="8"/><path d="M12 4v16a8 8 0 0 0 0-16z" fill="currentColor" stroke="none"/>', out: '<path d="M14 4h5v16h-5M10 8l-4 4 4 4M6 12h9"/>',
   search: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/>', edit: '<path d="M4 20h4l11-11-4-4L4 16z"/>', ext: '<path d="M14 4h6v6M20 4l-9 9M18 14v5H5V6h5"/>', bolt: '<path d="M13 3 5 14h6l-1 7 8-11h-6z"/>'
 };
@@ -178,6 +178,7 @@ function vWatch() {
       <dt>Interval</dt><dd>every ${esc(dur(w.every))}${w.mode === 'notify' ? `, quiet time ${esc(dur(w.renotify * 60))}` : ''}</dd>
       ${w.startsAt || w.endsAt ? `<dt>Active</dt><dd>${w.startsAt ? 'from ' + esc(when(w.startsAt)) : 'from creation'}${w.endsAt ? ' until ' + esc(when(w.endsAt)) : ''}</dd>` : ''}
       <dt>Key</dt><dd>${pdot(w.provider)} ${esc(P.name)} · <a href="#keys">${esc(w.keyLabel)}</a></dd></dl></div></section>
+    ${w.mode === 'launch' ? `<section class="block"><div class="block-h"><h2>Launch check</h2><p class="hint">Before a machine is free: would ${esc(P.name)} accept this launch as set up? Checked when the watch starts, every six hours, and when you press the button. Reads only.</p></div><div id="wPreOut" aria-live="polite">${S.pre && S.pre.id === w.id ? preList(S.pre) : (l.pre || (w.status && w.status.pre)) ? preList(l.pre || w.status.pre) : '<p class="hint">Not checked yet.</p>'}</div><p><button type="button" class="btn ghost sm" data-act="wPre" data-id="${esc(w.id)}">${ico('check', 15)}Check launch settings</button></p></section>` : ''}
     ${launches.length ? `<section class="block"><div class="block-h"><h2>Machines this watch started</h2></div>${machineTable(launches)}</section>` : ''}
     <section class="block"><div class="block-h"><h2>When it was free</h2><p class="hint">The last 24 hours, by configuration and ${esc(P.regionsLabel.toLowerCase().replace(/s$/, ''))}, as this watch saw it. Below: the share of each hour of the week with something free, over the last 7 days.</p></div>${strip(w, windows)}${heat(windows)}</section>
     <section class="block"><div class="block-h"><h2>Log</h2></div>${log(events)}</section>`;
@@ -222,7 +223,7 @@ function newEd(base) {
     names: base ? {...(base.spec.names || {})} : {}, prices: base ? {...(base.spec.prices || {})} : {}, currency: base ? base.spec.currency : 'USD',
     mode: base ? base.mode : 'notify', launch: base ? {...(base.spec.launch || {})} : {}, every: base ? base.every : null, minLevel: base ? base.spec.minLevel || 'low' : 'low',
     renotify: base ? base.renotify : 30, maxLaunch: base ? base.maxLaunch : 1, maxPrice: base && base.maxPrice != null ? base.maxPrice : '', startsAt: base ? base.startsAt : null, endsAt: base ? base.endsAt : null,
-    startNow: base ? base.state === 'on' : true, name: base ? base.name : '', named: !!base, group: base ? base.spec.group || '' : '', q: '', gpu: 'all', onlyFree: false, bound: base ? base.spec.boundRegion || null : null};
+    startNow: base ? base.state === 'on' : true, name: base ? base.name : '', named: !!base, group: base ? (base.spec.group || (base.mode === 'launch' ? '' : 'main')) : 'main', guard: base ? base.spec.guard !== false : true, pre: null, q: '', gpu: 'all', onlyFree: false, bound: base ? base.spec.boundRegion || null : null};
   if (k && e.every == null) e.every = (LIMITS[k.provider] || {def: 30}).def;
   if (k) for (const p of PARAMS[k.provider] || []) if (e.params[p.id] == null) e.params[p.id] = p.def;
   if (q.get('params')) try { Object.assign(e.params, JSON.parse(q.get('params'))); } catch { /* ignore */ }
@@ -289,8 +290,9 @@ function whereStep() {
   const sold = new Set(cat.configs.filter(c => e.configs.includes(c.id)).flatMap(c => c.regions || []));
   const regs = cat.regions.filter(r => !sold.size || sold.has(r.id) || sel.has(r.id) || freeIn.has(r.id));
   if (e.bound) return `<p class="note"><b>${esc(e.bound)} only.</b> A ${esc(boundWhat())} you chose lives in that ${esc(P.regionsLabel.toLowerCase().replace(/s$/, ''))}, so the watch is limited to it.</p>`;
-  const any = !e.regions.length;
-  return `<div class="ctl">${seg('edAny', any ? 'any' : 'pick', [['any', 'Any'], ['pick', 'Only these']], 'Regions')}</div>
+  const any = !e.regions.length, eu = regs.filter(r => inEurope(e.provider, r.id)).map(r => r.id);
+  const isEu = !any && eu.length && e.regions.length === eu.length && e.regions.every(r => eu.includes(r));
+  return `<div class="ctl">${seg('edAny', any ? 'any' : isEu ? 'eu' : 'pick', [['any', 'Any'], ...(eu.length ? [['eu', 'Europe']] : []), ['pick', 'Only these']], 'Regions')}</div>
     ${any ? `<p class="hint">Any of ${s(regs.length, P.regionsLabel.toLowerCase().replace(/s$/, ''), P.regionsLabel.toLowerCase())} where it is sold. When several are free at once, the one with the higher level goes first.</p>`
       : `<div class="regions" role="group" aria-label="${esc(P.regionsLabel)}">${regs.map(r => `<button type="button" class="chip" data-act="edReg" data-v="${esc(r.id)}" aria-pressed="${sel.has(r.id)}">${freeIn.has(r.id) ? '<span class="lv lv-high" aria-label="free now"><span class="bars"><b></b><b></b><b></b></span></span>' : ''}${esc(r.name)}${sel.has(r.id) ? ` <span class="mute">${e.regions.indexOf(r.id) + 1}</span>` : ''}</button>`).join('')}</div><p class="hint">The number on a chosen chip is its order of preference.</p>`}`;
 }
@@ -306,8 +308,19 @@ function foundStep() {
   return `${mode}<div class="two-f"><label class="fld"><span>How many machines</span><span class="unit"><input type="number" min="1" max="10" step="1" id="edMax" data-ed="maxLaunch" value="${esc(e.maxLaunch)}"> at most</span><small>The watch finishes after this many. Each one bills by the hour.</small></label>
     <label class="fld"><span>Price cap <i>optional</i></span><span class="unit"><input type="number" min="0" step="0.01" id="edPrice" data-ed="maxPrice" value="${esc(e.maxPrice)}" placeholder="none"> ${esc(e.currency || 'USD')}/h</span><small>Skip configurations above this hourly price.</small></label></div>
     <label class="fld"><span>Shared group <i>optional</i></span><input type="text" id="edGroup" data-ed="group" maxlength="40" value="${esc(e.group || '')}" placeholder="for example: competition" autocomplete="off"><small>Hunting for the same machine with several watches, keys or providers? Give them one group name. The group starts no more machines in total than the number above; once it has them, its other launch watches stop.</small></label>
+    <label class="tgl"><input type="checkbox" id="edGuard" data-chg="edGuard"${e.guard ? ' checked' : ''}><span>Account guard: never start one while the ${esc(P.name)} account already runs a machine of this kind</span></label>
+    <p class="hint" style="margin-top:-6px">Checked against the provider itself before every launch, whoever started that machine. Machines API Check started under this name always count.</p>
     <fieldset class="fld" style="border:0;padding:0;margin:0;display:grid;gap:14px"><legend class="vh">Launch settings</legend>${fields}</fieldset>
-    ${P.notes && P.notes.length ? `<div class="note warn">${P.notes.map(n => esc(n)).join('<br>')}</div>` : ''}`;
+    ${P.notes && P.notes.length ? `<div class="note warn">${P.notes.map(n => esc(n)).join('<br>')}</div>` : ''}
+    <div class="pre"><button type="button" class="btn ghost" data-act="edPre"${!e.configs.length ? ' disabled' : ''}>${ico('check', 16)}Check launch settings</button><span class="hint">Reads only: nothing is started. It asks ${esc(P.name)} whether each setting would be accepted.</span></div>
+    <div id="edPreOut" aria-live="polite">${e.pre ? preList(e.pre) : ''}</div>`;
+}
+function preList(p) {
+  if (p.busy) return '<p class="hint">Checking…</p>';
+  if (p.error) return `<p class="note warn">${esc(p.error)}</p>`;
+  const n = {fail: 0, warn: 0}; for (const x of p.checks) if (n[x.level] != null) n[x.level]++;
+  const head = n.fail ? `<b>${s(n.fail, 'problem')}: a launch would fail.</b>` : n.warn ? '<b>Would go through</b>, with notes.' : '<b>Would go through.</b>';
+  return `<div class="prelist ${n.fail ? 'bad' : 'good'}"><p>${head} <span class="mute">${esc(when(p.at))}</span></p><ul>${p.checks.map(x => `<li class="pl-${esc(x.level)}"><span class="vh">${x.level === 'fail' ? 'Problem: ' : x.level === 'warn' ? 'Note: ' : 'OK: '}</span>${esc(x.text)}</li>`).join('')}</ul></div>`;
 }
 function fieldHtml(f, opts) {
   const e = S.ed, v = e.launch[f.id] ?? f.def ?? '', id = 'lf_' + f.id, req = f.required ? '' : ' <i>optional</i>';
@@ -346,7 +359,7 @@ function edSide() {
     : `Every <b>${esc(shortDur(e.every))}</b>, ask ${esc(P.name)} whether <b>${esc(e.configs.map(c => e.names[c] || c).join(' or '))}</b> is free in <b>${esc(e.bound || (e.regions.length ? e.regions.join(', ') : 'any ' + P.regionsLabel.toLowerCase().replace(/s$/, '')))}</b>. ${e.mode === 'launch' ? `When it is, <b>start ${s(Number(e.maxLaunch) || 1, 'machine')}</b> and email you.` : 'When it is, <b>email you</b>.'}`;
   return `<h3>Summary</h3><p class="say">${say}</p>
     ${e.configs.length ? `<dl class="kv">${cost ? `<dt>Price</dt><dd>${esc(top > cost ? money(cost, e.currency) + ' to ' + perHour(top, e.currency) : perHour(cost, e.currency))}${e.mode === 'launch' ? `<br><span class="mute">${esc(money(top * 24, e.currency))} a day at most per machine</span>` : ''}</dd>` : ''}<dt>Requests</dt><dd>about ${nf().format(Math.round(86400 / Math.max(1, Number(e.every) || 1)))} a day, shared with your other watches on this key</dd>${e.endsAt ? `<dt>Until</dt><dd>${esc(when(e.endsAt))}</dd>` : ''}</dl>` : ''}
-    ${e.mode === 'launch' && e.configs.length ? `<p class="note warn">A started machine bills until you terminate it in ${esc(P.name)}'s console. API Check never terminates machines.</p>` : ''}
+    ${e.mode === 'launch' && e.configs.length ? `<p class="note warn">A started machine bills until you terminate it in ${esc(P.name)}'s console. API Check never terminates a machine it keeps${e.provider === 'runpod' ? ' (a pod RunPod places outside the chosen data centers is terminated at once)' : ''}.</p>` : ''}
     <p class="err" role="alert" id="edErr" hidden></p>
     <button type="button" class="btn" data-act="edSave"${!e.configs.length ? ' disabled' : ''}>${e.id ? 'Save changes' : e.startNow ? 'Save and start watching' : 'Save, paused'}</button>
     <a class="btn ghost" href="${e.id ? '#watch/' + esc(e.id) : '#watches'}">Cancel</a>`;
@@ -359,7 +372,7 @@ async function saveEd() {
   if (!e.configs.length) return say(API_ERR.configs);
   const body = {keyId: e.keyId, name: (e.name || '').trim() || autoName(), mode: e.mode, every: Number(e.every), maxLaunch: Number(e.maxLaunch) || 1, renotify: Number(e.renotify) || 30,
     maxPrice: e.maxPrice === '' || e.maxPrice == null ? null : Number(e.maxPrice), startsAt: e.startsAt, endsAt: e.endsAt, paused: !e.startNow,
-    spec: {configs: e.configs, regions: e.bound ? [e.bound] : e.regions, minLevel: e.minLevel, params: e.params, launch: e.launch, names: e.names, prices: e.prices, currency: e.currency, boundRegion: e.bound || undefined, group: e.mode === 'launch' ? (e.group || '').trim() || undefined : undefined}};
+    spec: {configs: e.configs, regions: e.bound ? [e.bound] : e.regions, minLevel: e.minLevel, params: e.params, launch: e.launch, names: e.names, prices: e.prices, currency: e.currency, boundRegion: e.bound || undefined, group: e.mode === 'launch' ? (e.group || '').trim() || undefined : undefined, guard: e.mode === 'launch' && !e.guard ? false : undefined}};
   if (b.dataset.busy) return; b.dataset.busy = '1'; b.setAttribute('aria-busy', 'true');
   try {
     let id = e.id;
@@ -402,14 +415,14 @@ async function loadMarket() {
 }
 
 /* ---------- machines ---------- */
-const LST = {created: ['Started', 'go'], pending: ['Being started', 'live'], failed: ['Refused', 'crit'], unknown: ['Not confirmed', 'warn']};
+const LST = {created: ['Started', 'go'], pending: ['Being started', 'live'], failed: ['Refused', 'crit'], unknown: ['Not confirmed', 'warn'], ended: ['Ended', 'mute']};
 function machineTable(items) {
   return `<div class="scroll"><table class="tbl hov cards"><thead><tr><th>Machine</th><th>Configuration</th><th>Where</th><th>State</th><th class="r">Price</th><th class="hide-m">Started</th><th></th></tr></thead><tbody>${items.map(l => { const d = l.detail || {}, [t, tone] = LST[l.state] || [l.state, 'mute'];
     return `<tr><td class="c-name"><b class="wrap-any">${esc(l.name || l.extId || '')}</b><span class="meta">${pdot(l.provider)} ${esc(pv(l.provider).name)}${l.extId ? ' · <code>' + esc(l.extId) + '</code>' : ''}</span>${l.watchName ? `<span class="meta">by <a href="#watch/${esc(l.watchId)}">${esc(l.watchName)}</a></span>` : ''}</td>
       <td data-l="Configuration">${esc(l.target)}</td><td data-l="Where">${esc(l.region)}${d.ip ? `<span class="meta"><code>${esc(d.ip)}</code></span>` : ''}${d.ssh ? `<span class="meta"><code>${esc(d.ssh)}</code></span>` : ''}</td>
       <td data-l="State">${st(t, tone)}${d.status ? `<span class="meta">${esc(String(d.status).toLowerCase())}${d.readAt ? ', read ' + esc(ago(d.readAt)) : ''}</span>` : ''}${l.error ? `<span class="meta wrap-any">${esc(l.error)}</span>` : ''}</td>
       <td class="r" data-l="Price">${esc(perHour(l.price, l.currency))}</td><td class="hide-m mute">${esc(when(l.createdAt))}</td>
-      <td class="r">${l.extId && l.state !== 'failed' ? `<button type="button" class="btn ghost sm" data-act="mRefresh" data-id="${esc(l.id)}">${ico('sync', 15)}Read status</button>` : ''}${pv(l.provider).site ? ` <a class="btn ghost sm" href="${esc(pv(l.provider).site)}" target="_blank" rel="noopener noreferrer">${ico('ext', 15)}Console</a>` : ''}</td></tr>`; }).join('')}</tbody></table></div>`;
+      <td class="r">${l.extId && (l.state === 'created' || l.state === 'unknown') ? `<button type="button" class="btn ghost sm" data-act="mRefresh" data-id="${esc(l.id)}">${ico('sync', 15)}Read status</button>` : ''}${l.state === 'unknown' ? ` <button type="button" class="btn ghost sm" data-act="mForget" data-id="${esc(l.id)}">Nothing was started</button>` : ''}${pv(l.provider).site ? ` <a class="btn ghost sm" href="${esc(pv(l.provider).site)}" target="_blank" rel="noopener noreferrer">${ico('ext', 15)}Console</a>` : ''}</td></tr>`; }).join('')}</tbody></table></div>`;
 }
 function vMachines() {
   const l = S.D.launches.items;
@@ -585,21 +598,43 @@ const ACT = {
   keyDel(el) { const k = keyOf(el.dataset.id); if (!el.dataset.sure) return dConfirm('Delete key', `<b>${esc(k.label)}</b> and its ${s(k.watches, 'watch', 'watches')} will be deleted. Machines already started keep running at ${esc(pv(k.provider).name)}.`, 'keyDel', k.id, 'Delete key'); act(async () => { await api.deleteKey(k.id); closeDlg(); S.me = await api.me(); await render(); }, 'Key deleted.'); },
   wPause(el) { act(async () => { await api.patchWatch(el.dataset.id, {state: 'paused'}); await refresh(); }, 'Paused.'); },
   wResume(el) { act(async () => { await api.patchWatch(el.dataset.id, {state: 'on'}); await refresh(); }, 'Watching again.'); },
+  async wPre(el) {
+    const id = el.dataset.id, out = () => $('#wPreOut'); if (el.dataset.busy) return; el.dataset.busy = '1'; el.setAttribute('aria-busy', 'true');
+    S.pre = {id, busy: true}; if (out()) out().innerHTML = preList(S.pre);
+    try { const r = await api.preflightWatch(id); S.pre = {id, checks: r.checks, at: r.at}; }
+    catch (x) { if (x.code === 'auth') return expired(); S.pre = {id, error: apiMsg(x)}; }
+    finally { delete el.dataset.busy; el.removeAttribute('aria-busy'); }
+    if (out()) out().innerHTML = preList(S.pre);
+  },
   wCheck(el) { act(async () => { await api.checkNow(el.dataset.id); setTimeout(refresh, 1500); }, 'Checking now.'); },
   wDel(el) { const w = watchOf(el.dataset.id); if (!el.dataset.sure) return dConfirm('Delete watch', `<b>${esc(w.name)}</b> and its log will be deleted. Machines it started keep running and stay listed under Machines.`, 'wDel', w.id, 'Delete watch'); act(async () => { await api.deleteWatch(w.id); closeDlg(); go('watches'); }, 'Watch deleted.'); },
   edReload() { loadCat(); },
   edParam(el) { S.ed.params[el.dataset.p] = /^\d+$/.test(el.dataset.v) ? Number(el.dataset.v) : el.dataset.v; S.ed.configs = []; loadCat(); },
   edUp(el) { const i = +el.dataset.i, c = S.ed.configs; [c[i - 1], c[i]] = [c[i], c[i - 1]]; paintEd(); },
   edDown(el) { const i = +el.dataset.i, c = S.ed.configs; [c[i + 1], c[i]] = [c[i], c[i + 1]]; paintEd(); },
-  edAny(el) { if (el.dataset.v === 'any') S.ed.regions = []; else if (!S.ed.regions.length) { const free = (S.ed.cat.offers || []).filter(o => S.ed.configs.includes(o.config)).map(o => o.region); S.ed.regions = [...new Set(free)].slice(0, 1); if (!S.ed.regions.length && S.ed.cat.regions[0]) S.ed.regions = [S.ed.cat.regions[0].id]; } paintEd(); },
+  edAny(el) { if (el.dataset.v === 'eu') { const sold = new Set(S.ed.cat.configs.filter(c => S.ed.configs.includes(c.id)).flatMap(c => c.regions || [])); S.ed.regions = S.ed.cat.regions.map(r => r.id).filter(id => inEurope(S.ed.provider, id) && (!sold.size || sold.has(id))); paintEd(); return; } if (el.dataset.v === 'any') S.ed.regions = []; else if (!S.ed.regions.length) { const free = (S.ed.cat.offers || []).filter(o => S.ed.configs.includes(o.config)).map(o => o.region); S.ed.regions = [...new Set(free)].slice(0, 1); if (!S.ed.regions.length && S.ed.cat.regions[0]) S.ed.regions = [S.ed.cat.regions[0].id]; } paintEd(); },
   edReg(el) { const r = S.ed.regions, v = el.dataset.v, i = r.indexOf(v); if (i >= 0) r.splice(i, 1); else r.push(v); paintEd(); },
   edEvery(el) { S.ed.every = Number(el.dataset.v); paintEd(); },
   edLevel(el) { S.ed.minLevel = el.dataset.v; paintEd(); },
   edSave() { saveEd(); },
+  async edPre(el) {
+    const e = S.ed, out = $('#edPreOut'); if (el.dataset.busy) return; el.dataset.busy = '1'; el.setAttribute('aria-busy', 'true');
+    e.pre = {busy: true}; out.innerHTML = preList(e.pre);
+    try {
+      const r = await api.preflightKey(e.keyId, {maxLaunch: Number(e.maxLaunch) || 1, every: Number(e.every), spec: {configs: e.configs, regions: e.bound ? [e.bound] : e.regions, minLevel: e.minLevel, params: e.params, launch: e.launch, names: e.names, prices: e.prices, currency: e.currency, group: (e.group || '').trim() || undefined, guard: e.guard ? undefined : false}});
+      e.pre = {checks: r.checks, at: r.at};
+    } catch (x) { if (x.code === 'auth') return expired(); e.pre = {error: x.code === 'launch_field' ? `Check “${(pv(e.provider).launch.find(y => y.id === x.field) || {label: x.field}).label}” first.` : apiMsg(x)}; }
+    finally { delete el.dataset.busy; el.removeAttribute('aria-busy'); }
+    const o = $('#edPreOut'); if (o) o.innerHTML = preList(e.pre);
+  },
   mkLoad() { loadMarket(); },
   mkParam(el) { S.mk.params[el.dataset.p] = /^\d+$/.test(el.dataset.v) ? Number(el.dataset.v) : el.dataset.v; loadMarket(); },
   mkWatch(el) { const k = keyOf(S.mk.key); go(`new?key=${encodeURIComponent(k.id)}&config=${encodeURIComponent(el.dataset.c)}&region=${encodeURIComponent(el.dataset.r)}&params=${encodeURIComponent(JSON.stringify(S.mk.params))}`); },
   mRefresh(el) { act(async () => { const r = await api.refreshLaunch(el.dataset.id); toast(`Status: ${String((r.detail && r.detail.status) || 'not found').toLowerCase()}${r.detail && r.detail.ip ? ', address ' + r.detail.ip : ''}.`); await render(); }); },
+  mForget(el) {
+    if (!el.dataset.sure) return dConfirm('Nothing was started?', 'Only confirm after checking the provider console: there is no machine with this name. The launch stops counting, and the watch can be resumed and may start a machine.', 'mForget', el.dataset.id, 'Yes, nothing was started');
+    act(async () => { await api.forgetLaunch(el.dataset.id); closeDlg(); await render(); }, 'Done. The watch can be resumed.');
+  },
   aFilter(el) { S.af = el.dataset.v; render(); },
   async aMore() { const l = S.D.events.items, more = await api.events({before: l[l.length - 1].at, kind: S.af === 'all' ? '' : S.af}); S.D.events.items = l.concat(more.items); paintMain(); },
   testMail() { act(async () => { await api.testMail(); await render(); }, 'Test sent. Check your inbox.'); },
@@ -624,6 +659,7 @@ const CHG = {
     paintEd();
   },
   edLaunchT(el) { S.ed.launch[el.dataset.f] = el.checked; paintSide(); },
+  edGuard(el) { S.ed.guard = el.checked; },
   edDate(el) { S.ed[el.dataset.f] = el.value ? new Date(el.value).getTime() : null; paintSide(); },
   edNow(el) { S.ed.startNow = el.checked; paintSide(); },
   kProv(el) { const keep = ($('#kKey') || {}).value; dKeyAdd(el.value); const k = $('#kKey'); if (k && keep) k.value = keep; const r = $(`input[name=kpv][value="${el.value}"]`); if (r) r.focus(); },

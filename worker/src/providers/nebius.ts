@@ -3,7 +3,7 @@
 // Availability: the capacity advisor, GET /capacity/v1/resource-advice?parentId=<tenant>: a launch chance per region, platform and preset, clipped by your quota.
 // Launch: POST /compute/v1/instances returns an operation; a placement failure says "Not enough resources", either on the call or on the operation.
 import {ProviderError} from '../types';
-import type {Provider, Ctx, Catalog, Config, Offer, Level} from '../types';
+import type {Provider, Ctx, Catalog, Config, Offer, Level, Check, Machine} from '../types';
 import {call, messageOf, Unclear, prep} from './net';
 import type {Classify} from './net';
 
@@ -44,9 +44,11 @@ const classify: Classify = (status, body, text) => {
   if (NER.test(msg) || /notEnoughResources/.test(details)) return 'capacity';
   if (status === 401 || code === 16) return 'auth';
   if (status === 403 || code === 7) return 'auth';
-  if (code === 8 || /quotaFailure/.test(details)) return /tooManyRequests/.test(details) ? 'rate' : 'quota';
+  if (/tooManyRequests/.test(details)) return 'rate';
+  if (/quotaFailure/.test(details)) return 'quota';
+  if (code === 8) return 'capacity';   // RESOURCE_EXHAUSTED with no quota failure in it: no room right now (the docs give no code for "Not enough resources")
   if (status === 429) return 'rate';
-  if (code === 14 || code === 13 || code === 4 || status >= 500) return 'http';
+  if (code === 14 || code === 13 || code === 4 || code === 10 || status >= 500) return 'http';   // 10 ABORTED: a conflict, worth another try
   return 'invalid';
 };
 async function api(c: Ctx, path: string, init: RequestInit & {memo?: boolean} = {}): Promise<any> {
@@ -80,10 +82,26 @@ async function advice(c: Ctx, tenant: string, kind: string): Promise<{offers: Of
     const st = it.status && it.status[kind]; if (!st) continue;
     const lv = LV[st.availabilityLevel] || 'none', id = ci.platform + '|' + ci.preset.name, k = id + '|' + it.spec.region;
     if (lv === 'none') continue;
-    const o: Offer = {config: id, region: it.spec.region, level: lv, note: `${st.available ?? '?'} launchable${st.dataState === 'DATA_STATE_STALE' ? ', data not fresh' : ''}`};
+    const o: Offer = {config: id, region: it.spec.region, level: lv, note: `${st.available ?? '?'} launchable${st.dataState === 'DATA_STATE_STALE' ? ', data not fresh' : ''}${st.effectiveAt ? ', measured ' + String(st.effectiveAt).slice(11, 19) + ' UTC' : ''}`};
     const old = best.get(k); if (!old || ['low', 'medium', 'high'].indexOf(lv) > ['low', 'medium', 'high'].indexOf(old.level)) best.set(k, o);
   }
   return {offers: [...best.values()], items};
+}
+/* delete a failed machine, a few times if Nebius is still busy with it (one operation per resource at a time) */
+async function remove(c: Ctx, id: string) {
+  for (let i = 0; i < 4; i++) {
+    try { await api(c, '/compute/v1/instances/' + encodeURIComponent(id), {method: 'DELETE'}); return; }
+    catch (e) { if (e instanceof ProviderError && e.status === 404) return; await sleep(3000); }
+  }
+}
+/* the first subnet of a project, kept for ten minutes so a launch is a single request */
+const subnets = new Map<string, {id: string; at: number}>();
+async function firstSubnet(c: Ctx, project: string): Promise<string> {
+  const hit = subnets.get(project);
+  if (hit && Date.now() - hit.at < 10 * 60e3) return hit.id;
+  const xs = await list(c, '/vpc/v1/subnets?parentId=' + encodeURIComponent(project), true), id = (xs[0] && xs[0].metadata.id) || '';
+  if (id) subnets.set(project, {id, at: Date.now()});
+  return id;
 }
 const PRICE: Record<string, number> = {'gpu-h100-sxm': 4.5, 'gpu-h200-sxm': 5.4, 'gpu-b200-sxm': 8.5, 'gpu-b200-sxm-a': 8.5, 'gpu-b300-sxm': 9.5};
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -131,7 +149,7 @@ export const nebius: Provider = {
     if (!project) throw new ProviderError('invalid', `No project for region ${p.region}. Give the service account access to that region's project and check the key again.`);
     let subnet = s.subnet && (s.subnet_region ? s.subnet_region === p.region : true) ? s.subnet : '';
     await prep(token(c));   // a token problem must not look like an unclear launch
-    if (!subnet) { const xs = await prep(list(c, '/vpc/v1/subnets?parentId=' + encodeURIComponent(project), true)); subnet = xs[0] && xs[0].metadata.id; }
+    if (!subnet) subnet = await prep(firstSubnet(c, project));
     if (!subnet) throw new ProviderError('invalid', `No subnet in ${p.region}.`);
     const name = vmName(p.name);
     const keys = String(s.ssh_keys || '').split('\n').map(x => x.trim()).filter(Boolean), user = s.username || 'ubuntu';
@@ -152,11 +170,12 @@ export const nebius: Provider = {
     const id = op && op.resourceId;
     // wait for the operation: placement failures arrive here
     let done = op && op.status ? op : null;
-    for (let i = 0; !done && i < 45; i++) { await sleep(1500); const o = await api(c, '/compute/v1/instances/operations/' + encodeURIComponent(op.id)).catch(() => null); if (o && o.status) done = o; }
+    for (let i = 0; !done && i < 160; i++) { await sleep(1500); const o = await api(c, '/compute/v1/instances/operations/' + encodeURIComponent(op.id)).catch(() => null); if (o && o.status) done = o; }
     if (done && done.status && done.status.code) {
       const msg = messageOf(done.status, '', 0), kind = classify(400, done.status, msg) || 'invalid';
-      if (id) await api(c, '/compute/v1/instances/' + encodeURIComponent(id), {method: 'DELETE'}).catch(() => null);   // a failed VM keeps its name and boot disk until deleted
-      throw new ProviderError(kind, msg);
+      if (id) await remove(c, id);   // a failed VM keeps its name, its boot disk and its quota until deleted
+      // a finished operation is a definite answer (status 1): the engine must not go looking for this machine as if the answer were unclear
+      throw new ProviderError(kind, msg, 1);
     }
     if (!id) throw new ProviderError('http', 'Nebius accepted the request but returned no instance id.');
     if (!done) {
@@ -172,9 +191,61 @@ export const nebius: Provider = {
       const i = await api(c, '/compute/v1/instances/get-by-name?parentId=' + encodeURIComponent(project) + '&name=' + encodeURIComponent(vmName(p.name)));
       const st = i && i.status && i.status.state;
       // a machine that failed to place is not a machine; launch() deletes those
-      if (i && i.metadata && i.metadata.id && st === 'ERROR') { await api(c, '/compute/v1/instances/' + encodeURIComponent(i.metadata.id), {method: 'DELETE'}).catch(() => null); return null; }
+      if (i && i.metadata && i.metadata.id && st === 'ERROR') { await remove(c, i.metadata.id); return null; }
+      if (st === 'DELETING') return null;
       return i && i.metadata && i.metadata.id ? {extId: i.metadata.id, status: st} : null;
     } catch (e) { if (e instanceof ProviderError && (e.status === 404 || /not.?found/i.test(e.message))) return null; throw e; }
+  },
+  async active(c) {
+    const projects: Record<string, string> = (c.meta && c.meta.projects) || {}, out: Machine[] = [];
+    for (const [region, pid] of Object.entries(projects)) for (const i of await list(c, '/compute/v1/instances?parentId=' + encodeURIComponent(pid))) {
+      const st = i.status && i.status.state, r = i.spec && i.spec.resources;
+      if (st === 'DELETING' || st === 'ERROR') continue;   // ERROR machines are failed placements, deleted by the launch
+      out.push({extId: i.metadata.id, name: i.metadata.name || '', config: r ? r.platform + '|' + r.preset : '', region, status: st || 'unknown'});
+    }
+    return out;
+  },
+  async preflight(c, spec) {
+    const out: Check[] = [], s = spec.launch || {}, kind = kindOf(c, spec), projects: Record<string, string> = (c.meta && c.meta.projects) || {};
+    const tenant = c.meta && c.meta.tenant;
+    if (!tenant) return [{level: 'fail', text: 'The key has no tenant on record. Check the key again on the Keys page.'}];
+    const items = await list(c, '/capacity/v1/resource-advice?parentId=' + encodeURIComponent(tenant));
+    const sold = (cfg: string) => [...new Set(items.filter((it: any) => it.spec && it.spec.computeInstance && it.spec.computeInstance.platform + '|' + it.spec.computeInstance.preset.name === cfg).map((it: any) => it.spec.region))] as string[];
+    const regions: string[] = spec.regions && spec.regions.length ? spec.regions : [...new Set<string>((spec.configs || []).flatMap(sold))];
+    if (!regions.length) out.push({level: 'fail', text: 'None of the chosen presets is sold in any region this account sees.'});
+    const imageFam = s.image || 'ubuntu24.04-cuda13.0';
+    for (const region of regions) {
+      const pid = projects[region];
+      if (!pid) { out.push({level: 'fail', text: `No project in ${region}: the service account needs the editor role in that region's project.`}); continue; }
+      const platforms = await list(c, '/compute/v1/platforms?parentId=' + encodeURIComponent(pid));
+      for (const cfg of spec.configs || []) {
+        const [platform, preset] = String(cfg).split('|'), pl = platforms.find((x: any) => x.metadata && x.metadata.name === platform);
+        if (!sold(cfg).includes(region)) continue;
+        if (!pl) out.push({level: 'fail', text: `${region}: the platform ${platform} is not available to this project.`});
+        else if (!((pl.spec && pl.spec.presets) || []).some((x: any) => x.name === preset)) out.push({level: 'fail', text: `${region}: ${platform} has no preset ${preset}.`});
+        else out.push({level: 'ok', text: `${region}: ${platform} with ${preset}.`});
+        const adv = items.filter((it: any) => it.spec.region === region && it.spec.computeInstance.platform + '|' + it.spec.computeInstance.preset.name === cfg).map((it: any) => it.status && it.status[kind]).filter(Boolean);
+        if (adv.length && adv.every((st: any) => st.availabilityLevel === 'AVAILABILITY_LEVEL_LIMIT_REACHED')) out.push({level: 'fail', text: `${region}: Nebius reports "limit reached" for ${preset}: your quota (or a capacity block) makes a launch impossible. Raise the GPU quota in the console (Administration, Limits).`});
+        else if (adv.length) { const lim = Math.max(...adv.map((st: any) => Number(st.limit) || 0)); if (lim) out.push({level: 'ok', text: `${region}: quota allows ${lim} of ${preset}.`}); }
+      }
+      const subnetOk = s.subnet && (!s.subnet_region || s.subnet_region === region) ? (await list(c, '/vpc/v1/subnets?parentId=' + encodeURIComponent(pid))).some((x: any) => x.metadata.id === s.subnet) : !!(await firstSubnet(c, pid));
+      out.push(subnetOk ? {level: 'ok', text: `${region}: subnet found.`} : {level: 'fail', text: `${region}: ${s.subnet ? 'the chosen subnet does not exist any more' : 'the project has no subnet'}.`});
+      const imgs = await list(c, '/compute/v1/images/list-public?region=' + encodeURIComponent(region));
+      const im = imgs.find((x: any) => x.spec && x.spec.imageFamily === imageFam);
+      if (!im) out.push({level: 'fail', text: `${region}: no public image of the family ${imageFam}.`});
+      else {
+        const bad = (spec.configs || []).filter((cfg: string) => { const [platform, preset] = cfg.split('|'), u = im.spec.unsupportedPresets || []; return u.some((x: any) => x.platform === platform && (!x.preset || x.preset === preset)) || (im.spec.unsupportedPlatforms && im.spec.unsupportedPlatforms[platform]); });
+        out.push(bad.length ? {level: 'fail', text: `${region}: the image ${imageFam} does not support ${bad.join(', ')}.`} : {level: 'ok', text: `${region}: image ${imageFam}.`});
+      }
+      if (s.filesystem && (!s.filesystem_region || s.filesystem_region === region)) {
+        const f = (await list(c, '/compute/v1/filesystems?parentId=' + encodeURIComponent(pid))).find((x: any) => x.metadata.id === s.filesystem);
+        out.push(f ? {level: 'ok', text: `${region}: filesystem "${f.metadata.name}".`} : {level: 'fail', text: `${region}: the chosen filesystem does not exist any more.`});
+      }
+    }
+    const keys = String(s.ssh_keys || '').split('\n').map((x: string) => x.trim()).filter(Boolean);
+    if (s.user_data) out.push(/ssh_authorized_keys|ssh-(ed25519|rsa)|ecdsa-/.test(s.user_data) ? {level: 'ok', text: 'Your own cloud-init sets the login.'} : {level: 'warn', text: 'Your own cloud-init has no ssh_authorized_keys: check that you can log in.'});
+    else out.push(keys.length ? {level: 'ok', text: `${keys.length} SSH key${keys.length === 1 ? '' : 's'} for the user ${s.username || 'ubuntu'}.`} : {level: 'fail', text: 'No SSH public key is given, so nobody could log in to the machine.'});
+    return out;
   },
   async instance(c, extId) {
     const i = await api(c, '/compute/v1/instances/' + encodeURIComponent(extId));

@@ -61,3 +61,18 @@ A machine costs money, so a watch can never start more than it is allowed to:
 3. An unclear answer (timeout, network failure, 5xx, a reply without an id) is settled by asking the provider for a machine with that name, three times over about 30 seconds. Found: it is recorded and counted. A timeout with nothing found: the launch stays `unknown`, counts against the limit, the watch stops and cannot be resumed until the launch is deleted on the Machines page. A 5xx with nothing found: a refusal; the hunt goes on.
 4. A launch interrupted by a restart (deploy, eviction) is left `pending`; after 150 seconds the next check looks it up by name the same way.
 5. Inside one key, the Durable Object runs one turn at a time, so two watches on one key never launch in the same instant.
+6. The account guard asks the provider itself, before every launch, which machines the account runs. A machine of the configuration the watch hunts for (whoever started it), or one API Check started under the watch's machine name, stops the launch. The list is refreshed every 45 seconds in the background, so the launch never waits for it. It can be turned off per watch; machines API Check started always count.
+7. Launch watches share the group "main" unless another name is given, so several providers hunting for one machine start one in total.
+
+## Launch check
+
+`POST /api/keys/:id/preflight` (the form) and `POST /api/watches/:id/preflight` (the watch page) read, never write: the configuration still sold, SSH keys, images per region, filesystems and volumes, balance and spend limit (RunPod), project, platform, preset, quota, subnet and image (Nebius), and the account guard. The engine runs the same check when a launch watch starts and every six hours, and emails when something would fail.
+
+## Polling
+
+| Provider | Minimum | Why |
+|---|---|---|
+| Lambda | 2 s | 1 request/s in general; launches 1 per 12 s |
+| RunPod | 2 s | per-user minute/hour/day quotas; the engine reads the `RateLimit` header and slows down before any window runs dry |
+| Nebius | 5 s | no published limit; 429 backs off |
+

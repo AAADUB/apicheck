@@ -3,7 +3,7 @@
 //   What `amount` counts is not documented, so it is shown as is and a plan counts as free when it is 1 or more.
 // Launch: POST /1.3/server; 409 SERVER_RESOURCES_UNAVAILABLE = no capacity. GPU plans include no disk, so storage is always given.
 import {ProviderError} from '../types';
-import type {Provider, Ctx, Catalog, Config, Offer} from '../types';
+import type {Provider, Ctx, Catalog, Config, Offer, Machine} from '../types';
 import {call} from './net';
 import type {Classify} from './net';
 
@@ -112,6 +112,10 @@ export const upcloud: Provider = {
     const r = await get(c, '/server'), list = (r && r.servers && r.servers.server) || [];
     const sv = list.find((x: any) => x && x.title === p.name);
     return sv ? {extId: sv.uuid, status: sv.state} : null;
+  },
+  async active(c) {
+    const r = await get(c, '/server'), list = (r && r.servers && r.servers.server) || [];
+    return list.map((x: any): Machine => ({extId: x.uuid, name: x.title || '', config: x.plan || '', region: x.zone || '', status: x.state || ''}));
   },
   async instance(c, extId) {
     const r = await get(c, '/server/' + encodeURIComponent(extId)), sv = r && r.server;

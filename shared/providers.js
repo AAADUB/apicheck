@@ -3,14 +3,24 @@
 
 /* seconds between checks: the floor each provider's rate limits allow, and a sensible default; launchGap = least time between launch requests, ms */
 export const LIMITS = {
-  lambda: {min: 3, def: 10, launchGap: 12500},
+  lambda: {min: 2, def: 2, launchGap: 12500},     // 1 request/s in general, 1 launch per 12 s (Lambda OpenAPI 1.10.0)
   upcloud: {min: 15, def: 20, launchGap: 20000},
-  nebius: {min: 10, def: 20, launchGap: 5000},
-  runpod: {min: 5, def: 10, launchGap: 3000},
+  nebius: {min: 5, def: 5, launchGap: 5000},      // no published limit; a 429 backs off
+  runpod: {min: 2, def: 2, launchGap: 0},         // per-user minute/hour/day quotas; the engine paces itself from the RateLimit header
   hyperstack: {min: 5, def: 10, launchGap: 5000},
   fake: {min: 2, def: 5, launchGap: 0}
 };
 export const EVERY_MAX = 3600;
+/** which regions are in Europe, by each provider's own naming (checked against the region lists of 20.11.2026) */
+export const EUROPE = {
+  lambda: /^europe-/,                    // europe-central-1 (Germany), europe-south-1
+  runpod: /^EUR?-/,                      // EU-RO-1, EU-SE-1, EU-CZ-1, EU-NL-1, EU-FR-1, EUR-IS-1…, EUR-NO-1
+  nebius: /^(eu|uk)-/,                   // eu-north1 (Finland), eu-west1/2 (France), eu-south1 (Madrid), uk-south1/2
+  hyperstack: /^(NORWAY|SWEDEN|FINLAND|ICELAND|UK|GERMANY|NETHERLANDS|FRANCE|SPAIN|ITALY|POLAND)-/i,
+  upcloud: /^(de|fi|nl|pl|es|se|uk|dk|no|fr|it|at|ch|ie|be|cz)-/,
+  fake: /^test-east/
+};
+export const inEurope = (provider, region) => !!(EUROPE[provider] && EUROPE[provider].test(region));
 const RANK = {none: 0, low: 1, medium: 2, yes: 2, high: 3};
 export const levelRank = l => RANK[l] ?? 0;
 export const LEVEL_NAME = {high: 'High', medium: 'Medium', low: 'Low', yes: 'Available', none: 'None'};
@@ -119,7 +129,7 @@ export const PROVIDERS = {
 export const DEV_PROVIDER = {
   fake: {name: 'Test provider', short: 'T', site: '', keyHelp: 'Any key that starts with "test". Nothing is real and nothing costs money.', keyFields: [{id: 'key', label: 'Key', type: 'secret', ph: 'test-…'}], signal: 'level',
     signalText: 'Capacity comes and goes every minute: east for 20 seconds, west for 10.', regionsLabel: 'Regions',
-    launch: [{id: 'ssh_key', label: 'SSH key', type: 'select', from: 'sshKeys', required: true}, {id: 'name', label: 'Machine name', type: 'text', max: 60}, {id: 'fail', label: 'Make the launch fail', type: 'select', choices: [['', 'No'], ['quota', 'With an account limit'], ['timeout_made', 'Time out, machine made'], ['timeout', 'Time out, nothing made'], ['5xx', 'Server error, nothing made']]}], notes: []}
+    launch: [{id: 'ssh_key', label: 'SSH key', type: 'select', from: 'sshKeys', required: true}, {id: 'name', label: 'Machine name', type: 'text', max: 60}, {id: 'fail', label: 'Make the launch fail', type: 'select', choices: [['', 'No'], ['quota', 'With an account limit'], ['timeout_made', 'Time out, machine made'], ['timeout', 'Time out, nothing made'], ['5xx', 'Server error, nothing made'], ['preflight', 'Refused by the launch check']]}], notes: []}
 };
 /* settings that change what the provider is asked about, chosen before the configuration list loads */
 export const PARAMS = {

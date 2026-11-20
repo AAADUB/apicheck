@@ -37,6 +37,8 @@ export class Api {
   patchWatch(id, p) { return this.call('PATCH', '/watches/' + enc(id), p); }
   deleteWatch(id) { return this.call('DELETE', '/watches/' + enc(id)); }
   checkNow(id) { return this.call('POST', `/watches/${enc(id)}/check`, {}); }
+  preflightWatch(id) { return this.call('POST', `/watches/${enc(id)}/preflight`, {}); }
+  preflightKey(id, p) { return this.call('POST', `/keys/${enc(id)}/preflight`, p); }
   live() { return this.call('GET', '/live'); }
   events(q) { return this.call('GET', '/events?' + qs(q)); }
   launches() { return this.call('GET', '/launches'); }

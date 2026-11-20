@@ -50,7 +50,15 @@ export interface Ctx {
   meta: Record<string, any>;
   fetch: typeof fetch;
   now: number;
+  /** the slowest pace the provider's own rate-limit headers asked for during this turn, in ms between checks (RunPod sends them) */
+  pace?: number;
+  /** how long a read may take before it counts as no answer; the engine keeps polls short so one slow answer does not blind it */
+  timeout?: number;
 }
+/** a machine that exists in the provider account and is not terminated */
+export interface Machine { extId: string; name: string; config: string; region: string; status: string; gpus?: number; }   // gpus: where the configuration alone does not fix the count (RunPod)
+/** one line of a launch preflight: everything a launch would use, checked with reads only */
+export interface Check { level: 'ok' | 'warn' | 'fail'; text: string; }
 export interface LaunchPlan { config: string; region: string; name: string; spec: Record<string, any>; }
 export interface Launched { extId: string; name?: string; price?: number; currency?: string; detail?: Record<string, unknown>; }
 
@@ -76,6 +84,10 @@ export interface Provider {
   launch(c: Ctx, plan: LaunchPlan): Promise<Launched>;
   /** look for a machine by the exact name a launch gave it: how an unclear or interrupted launch is settled without starting a second machine */
   find?(c: Ctx, plan: LaunchPlan): Promise<{extId: string; status?: string} | null>;
+  /** every machine in the account that is not terminated, with its configuration in the same form as a watch names it: the account guard */
+  active?(c: Ctx, spec: Record<string, any>): Promise<Machine[]>;
+  /** reads only: would a launch with these settings be accepted, in each region the watch allows? */
+  preflight?(c: Ctx, spec: Record<string, any>): Promise<Check[]>;
   /** read a machine back after launch: status and address */
   instance?(c: Ctx, extId: string, region: string): Promise<Record<string, unknown> | null>;
 }

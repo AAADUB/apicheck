@@ -10,6 +10,7 @@ import {nebius, readCreds} from '../src/providers/nebius';
 import {hyperstack} from '../src/providers/hyperstack';
 import {MADE} from '../src/providers/fake';
 import {ProviderError} from '../src/types';
+import {paceOf} from '../src/providers/net';
 import {cleanLaunch} from '../../shared/providers.js';
 
 const E = env as any, ORIGIN = 'https://check.example';
@@ -158,6 +159,61 @@ describe('Hyperstack adapter', () => {
   });
 });
 
+describe('launch safety in the adapters', () => {
+  it('reads the RateLimit header into a pace that keeps every window from running dry', () => {
+    expect(paceOf('"minute";r=57;t=12, "hour";r=2800;t=1812, "day";r=43015;t=86000')).toBe(2000);
+    expect(paceOf('"minute";r=2;t=30')).toBe(30000);
+    expect(paceOf('nonsense')).toBe(0);
+  });
+  it('offers RunPod every allowed data center, and terminates a pod placed outside them', async () => {
+    const plan = {config: 'NVIDIA H100 80GB HBM3', region: 'EU-FR-1', name: 'comp-abc123', spec: {params: {count: 8, cloud: 'SECURE'}, regions: ['EU-SE-1', 'EU-FR-1'], launch: {}}};
+    const ok = mock([['/pods', 201, {id: 'pod1', name: 'comp-abc123', status: 'PROVISIONING', dataCenterId: 'EU-SE-1', cost: 35.12}]]);
+    const r = await runpod.launch(ctx(ok), plan);
+    expect(r).toMatchObject({extId: 'pod1', price: 35.12});
+    const body = JSON.parse(ok.log[0].init.body);
+    expect(body.dataCenterIds).toEqual(['EU-FR-1', 'EU-SE-1']);
+    expect(body.gpu).toMatchObject({id: 'NVIDIA H100 80GB HBM3', count: 8, minCudaVersion: '12.8'});
+    expect(body.image).toBe('runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404');
+    const away = mock([['/pods/pod2', 200, {}], ['/pods', 201, {id: 'pod2', name: 'comp-abc123', status: 'PROVISIONING', dataCenterId: 'CA-MTL-1'}]]);
+    expect(await kindOf(runpod.launch(ctx(away), plan))).toBe('capacity');
+    expect(away.log.some(h => h.init.method === 'DELETE' && h.url.endsWith('/pods/pod2'))).toBe(true);
+    const ms = await runpod.active(ctx(mock([['/pods', 200, {pods: [{id: 'a', name: 'x', status: 'RUNNING', gpu: {id: 'NVIDIA H100 80GB HBM3', count: 8}, dataCenterId: 'EU-SE-1'}, {id: 'b', name: 'y', status: 'TERMINATED'}], pagination: {hasNextPage: false}}]])));
+    expect(ms).toEqual([{extId: 'a', name: 'x', config: 'NVIDIA H100 80GB HBM3', gpus: 8, region: 'EU-SE-1', status: 'RUNNING'}]);
+  });
+  it('tells the RunPod launch check about balance, spend limit and SSH keys', async () => {
+    const f = mock([['/catalog/gpus', 200, {gpus: [{id: 'NVIDIA H100 80GB HBM3', name: 'H100 SXM', secure: true, maxCount: {secure: 8}, price: {secure: 4.39}}]}], ['/catalog/datacenters', 200, {dataCenters: [{id: 'EU-SE-1'}]}],
+      ['/billing/balance', 200, {balanceAmount: 29.24, billingMode: 'PREPAID'}], ['/account/limits', 200, {spendRate: {limit: 80, current: 0}}], ['/account/ssh-keys', 200, {keys: []}]]);
+    const out = await runpod.preflight(ctx(f), {configs: ['NVIDIA H100 80GB HBM3'], regions: ['EU-SE-1'], params: {count: 8, cloud: 'SECURE'}, launch: {}});
+    const fails = out.filter(x => x.level === 'fail').map(x => x.text).join(' | ');
+    expect(fails).toMatch(/Balance \$29.24 is less than one hour of the machine \(\$35.12\)/);
+    expect(fails).toMatch(/No SSH public key/);
+  });
+  it('checks Lambda launch settings: the key, and the image in every chosen region', async () => {
+    const f = mock([['/instance-types', 200, {data: {gpu_8x_h100_sxm5: {instance_type: {name: 'gpu_8x_h100_sxm5', description: '8x H100', price_cents_per_hour: 3672, architecture: 'x86_64'}, regions_with_capacity_available: []}}}],
+      ['/ssh-keys', 200, {data: [{name: 'laptop'}]}], ['/images', 200, {data: [{family: 'gpu-base-24-04', architecture: 'x86_64', region: {name: 'us-west-3'}}]}]]);
+    const c = Object.assign(ctx(f), {fast: true});
+    const out = await lambda.preflight(c, {configs: ['gpu_8x_h100_sxm5'], regions: ['europe-central-1'], launch: {ssh_key: 'gone', image: 'gpu-base-24-04'}});
+    const fails = out.filter(x => x.level === 'fail').map(x => x.text).join(' | ');
+    expect(fails).toMatch(/SSH key "gone" is not in the account/);
+    expect(fails).toMatch(/not offered in europe-central-1/);
+  });
+  it('treats Nebius RESOURCE_EXHAUSTED without a quota failure as no capacity, and a quota failure as a limit', async () => {
+    const pair = await crypto.subtle.generateKey({name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256'}, true, ['sign', 'verify']) as CryptoKeyPair;
+    const der = new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey) as ArrayBuffer);
+    const creds = JSON.stringify({'subject-credentials': {alg: 'RS256', 'private-key': '-----BEGIN PRIVATE KEY-----\n' + btoa(String.fromCharCode(...der)) + '\n-----END PRIVATE KEY-----', kid: 'publickey-n' + Math.random(), iss: 'serviceaccount-1', sub: 'serviceaccount-1'}});
+    const plan = {config: 'gpu-h100-sxm|8gpu-128vcpu-1600gb', region: 'eu-north1', name: 'comp-abc123', spec: {launch: {ssh_keys: 'ssh-ed25519 AAAA me'}, launchId: 'mch_1'}};
+    const run = (status: number, body: any) => nebius.launch(ctx(mock([['/oauth2/token/exchange', 200, {access_token: 't', expires_in: 3600}], ['/vpc/v1/subnets', 200, {items: [{metadata: {id: 'vpcsubnet-1'}}]}], ['/compute/v1/instances', status, body]]), creds, {projects: {'eu-north1': 'project-1'}}), plan);
+    expect(await kindOf(run(429, {code: 8, message: 'resource exhausted'}))).toBe('capacity');
+    expect(await kindOf(run(429, {code: 8, message: 'quota', details: [{quotaFailure: {violations: [{quota: 'gpu'}]}}]}))).toBe('quota');
+    expect(await kindOf(run(400, {code: 9, message: 'Not enough resources'}))).toBe('capacity');
+    // a create whose operation finishes with an error: a definite answer (status 1), so the engine never goes looking for a machine
+    const f = mock([['/oauth2/token/exchange', 200, {access_token: 't', expires_in: 3600}], ['/vpc/v1/subnets', 200, {items: [{metadata: {id: 'vpcsubnet-1'}}]}], ['/compute/v1/instances/ci-1', 200, {}], ['/compute/v1/instances', 200, {id: 'op1', resourceId: 'ci-1', status: {code: 13, message: 'internal error'}}]]);
+    try { await nebius.launch(ctx(f, creds, {projects: {'eu-north1': 'project-1'}}), plan); throw new Error('no'); }
+    catch (e: any) { expect(e).toBeInstanceOf(ProviderError); expect(e.status).toBe(1); expect(e.kind).toBe('http'); }
+    expect(f.log.some(h => h.init.method === 'DELETE' && h.url.endsWith('/compute/v1/instances/ci-1'))).toBe(true);
+  });
+});
+
 describe('launch settings', () => {
   it('cleans fields by the provider form', () => {
     expect(cleanLaunch('lambda', {ssh_key: 'laptop', image: '', name: '  comp  ', extra: 'dropped'})).toEqual({ssh_key: 'laptop', name: 'comp'});
@@ -175,7 +231,8 @@ const api = async (method: string, path: string, body?: unknown) => {
   return {status: res.status, data: await res.json() as any};
 };
 /* the engine runs one turn at a time (alarm() holds `busy`); a test turn waits for any alarm turn the API's poke started, and holds it too */
-const solo = async (w: any, fn: () => Promise<void>) => { while (w.busy) await new Promise(r => setTimeout(r, 20)); w.busy = true; try { w.keyNext = 0; for (const r of w.runs.values()) { r.reconAt = 0; r.holdUntil = 0; } await fn(); } finally { w.busy = false; } };
+const endAll = () => E.DB.prepare("UPDATE launches SET state = 'ended' WHERE state IN ('created', 'unknown')").run();
+const solo = async (w: any, fn: () => Promise<void>) => { while (w.busy) await new Promise(r => setTimeout(r, 20)); w.busy = true; try { w.keyNext = 0; w.guardList = null; w.guardAt = 0; for (const r of w.runs.values()) { r.reconAt = 0; r.holdUntil = 0; } await fn(); } finally { w.busy = false; } };
 const at = (sec: number) => { const base = Math.floor(Date.now() / 60000) * 60000 + 60000; return base + sec * 1000; };
 
 describe('workspace', () => {
@@ -238,8 +295,12 @@ describe('workspace', () => {
     });
     expect((await api('PATCH', '/watches/' + launchWatch, {state: 'on'})).data.error).toBe('launch_done');
     const m = await api('GET', '/launches'); expect(m.data.items[0]).toMatchObject({state: 'created', provider: 'fake'});
+    // a started machine cannot be forgotten while it may still run
+    expect((await api('DELETE', '/launches/' + m.data.items[0].id)).data.error).toBe('still_running');
+    await endAll();
   });
   it('stops on a refusal that would only repeat, and tells why', async () => {
+    await endAll();
     const r = await api('POST', '/watches', {keyId, name: 'Refused', mode: 'launch', every: 5, spec: {configs: ['fake_1x_a100'], launch: {ssh_key: 'laptop', fail: 'quota'}}});
     const stub = E.WATCHER.get(E.WATCHER.idFromName(keyId));
     await runInDurableObject(stub, async (w: any) => { w.loadedAt = 0; w.launchNext = 0; await w.tick(Date.now()); });
@@ -252,11 +313,13 @@ describe('workspace', () => {
     const run = async () => { const stub = E.WATCHER.get(E.WATCHER.idFromName(keyId)); await runInDurableObject(stub, async (w: any) => { await solo(w, async () => { w.loadedAt = 0; w.launchNext = 0; for (const r of w.runs.values()) r.next = 0; await w.tick(Date.now()); }); }); };
     const state = async (id: string) => ({w: await E.DB.prepare('SELECT state, launched, stop_reason FROM watches WHERE id = ?').bind(id).first(), l: (await E.DB.prepare('SELECT state, ext_id, name FROM launches WHERE watch_id = ?').bind(id).all()).results});
     // timed out, but the machine exists: found by name and counted, nothing more is started
+    await endAll();
     const a = await mk('timeout_made'); await run();
     let s = await state(a);
-    expect(s.l).toHaveLength(1); expect(s.l[0].state).toBe('created'); expect(s.l[0].ext_id).toBe(MADE.get(s.l[0].name));
+    expect(s.l).toHaveLength(1); expect(s.l[0].state).toBe('created'); expect(s.l[0].ext_id).toBe(MADE.get(s.l[0].name).id);
     expect(s.w).toMatchObject({state: 'done', launched: 1});
     // timed out and nothing there: unknown, the watch stops, and it cannot be resumed until the launch is deleted
+    MADE.clear(); await endAll();
     const b = await mk('timeout'); await run();
     s = await state(b);
     expect(s.l).toHaveLength(1); expect(s.l[0].state).toBe('unknown'); expect(s.w).toMatchObject({state: 'stopped'});
@@ -265,15 +328,17 @@ describe('workspace', () => {
     expect((await api('DELETE', '/launches/' + lid)).status).toBe(200);
     expect((await api('PATCH', '/watches/' + b, {state: 'paused'})).status).toBe(200);
     // a server error with no machine behind it: failed, and the watch keeps hunting
+    MADE.clear();
     const c5 = await mk('5xx'); await run();
     s = await state(c5);
     expect(s.l).toHaveLength(1); expect(s.l[0].state).toBe('failed'); expect(s.w.state).toBe('on');
     await E.DB.prepare("UPDATE watches SET state = 'paused' WHERE id IN (?, ?)").bind(c5, a).run();
   });
   it('picks up a launch a restart interrupted', async () => {
+    await endAll();
     const id = (await api('POST', '/watches', {keyId, name: 'Interrupted', mode: 'launch', every: 5, maxLaunch: 1, paused: true, spec: {configs: ['fake_1x_a100'], regions: ['test-east-1'], launch: {ssh_key: 'laptop'}}})).data.id;
     const old = Date.now() - 10 * 60e3, u = (await E.DB.prepare('SELECT user_id FROM watches WHERE id = ?').bind(id).first('user_id'));
-    MADE.set('apicheck-left01', 'test-left01');
+    MADE.set('apicheck-left01', {id: 'test-left01', config: 'fake_1x_a100', region: 'test-east-1', secret: 'elsewhere'});
     await E.DB.prepare("INSERT INTO launches (id, user_id, watch_id, key_id, provider, target, region, name, state, created_at, updated_at) VALUES ('mch_left01', ?, ?, ?, 'fake', 'fake_1x_a100', 'test-east-1', 'apicheck-left01', 'pending', ?, ?)").bind(u, id, keyId, old, old).run();
     await E.DB.prepare("UPDATE watches SET state = 'on' WHERE id = ?").bind(id).run();
     const stub = E.WATCHER.get(E.WATCHER.idFromName(keyId));
@@ -283,6 +348,7 @@ describe('workspace', () => {
     expect(await E.DB.prepare('SELECT state FROM watches WHERE id = ?').bind(id).first('state')).toBe('done');
   });
   it('lets a group of watches on different keys start one machine in total', async () => {
+    MADE.clear(); await endAll();
     const k2 = (await api('POST', '/keys', {provider: 'fake', label: 'Second', key: 'test-key-value-second'})).data.id;
     const body = (k: string, n: string) => ({keyId: k, name: n, mode: 'launch', every: 5, maxLaunch: 1, paused: true, spec: {configs: ['fake_1x_a100'], regions: ['test-east-1'], launch: {ssh_key: 'laptop'}, group: 'Competition'}});
     const w1 = (await api('POST', '/watches', body(keyId, 'Group one'))).data.id, w2 = (await api('POST', '/watches', body(k2, 'Group two'))).data.id;
@@ -295,6 +361,56 @@ describe('workspace', () => {
     expect(st.every((x: any) => x.state === 'done')).toBe(true);
     expect(st.find((x: any) => x.id === w1).stop_reason).toMatch(/Started 1 of 1/);
     expect(st.find((x: any) => x.id === w2).stop_reason).toMatch(/group "competition"/);
+  });
+  it('does not start a machine while the account already runs one of this kind', async () => {
+    MADE.clear(); await endAll();
+    MADE.set('by-hand', {id: 'test-byhand', config: 'fake_1x_a100', region: 'test-east-1', secret: 'test-key-value-123456'});
+    const id = (await api('POST', '/watches', {keyId, name: 'Guarded', mode: 'launch', every: 5, maxLaunch: 1, paused: true, spec: {configs: ['fake_1x_a100'], regions: ['test-east-1'], launch: {ssh_key: 'laptop'}}})).data.id;
+    await E.DB.prepare("UPDATE watches SET state = 'on' WHERE id = ?").bind(id).run();
+    const tick = () => runInDurableObject(E.WATCHER.get(E.WATCHER.idFromName(keyId)), async (w: any) => { await solo(w, async () => { w.loadedAt = 0; w.launchNext = 0; for (const r of w.runs.values()) r.next = 0; await w.tick(Date.now()); }); });
+    await tick();
+    expect(await E.DB.prepare('SELECT COUNT(*) AS n FROM launches WHERE watch_id = ?').bind(id).first('n')).toBe(0);
+    const wr = await E.DB.prepare('SELECT state, stop_reason FROM watches WHERE id = ?').bind(id).first();
+    expect(wr.state).toBe('stopped'); expect(wr.stop_reason).toMatch(/already runs by-hand/);
+    // with the guard off, a machine started by hand does not count; one API Check started under this name always does
+    await E.DB.prepare("UPDATE watches SET state = 'on', spec = json_set(spec, '$.guard', json('false')) WHERE id = ?").bind(id).run();
+    MADE.set('apicheck-0a1b2c', {id: 'test-ours', config: 'fake_8x_h100', region: 'test-east-1', secret: 'test-key-value-123456'});
+    await tick();
+    expect((await E.DB.prepare('SELECT stop_reason FROM watches WHERE id = ?').bind(id).first('stop_reason'))).toMatch(/apicheck-0a1b2c/);
+    MADE.delete('apicheck-0a1b2c');
+    await E.DB.prepare("UPDATE watches SET state = 'on' WHERE id = ?").bind(id).run();
+    await tick();
+    expect(await E.DB.prepare("SELECT COUNT(*) AS n FROM launches WHERE watch_id = ? AND state = 'created'").bind(id).first('n')).toBe(1);
+    MADE.clear();
+  });
+  it('waits, instead of giving up, while another launch of its group is in flight', async () => {
+    MADE.clear(); await endAll();
+    const id = (await api('POST', '/watches', {keyId, name: 'Waits', mode: 'launch', every: 5, maxLaunch: 1, paused: true, spec: {configs: ['fake_1x_a100'], regions: ['test-east-1'], launch: {ssh_key: 'laptop'}, group: 'main'}})).data.id;
+    const u = await E.DB.prepare('SELECT user_id FROM watches WHERE id = ?').bind(id).first('user_id');
+    await E.DB.prepare("INSERT INTO launches (id, user_id, watch_id, key_id, provider, target, region, name, state, grp, created_at, updated_at) VALUES ('mch_sibling', ?, NULL, NULL, 'nebius', 'x', 'eu-north1', 'sib-000000', 'pending', 'main', ?, ?)").bind(u, Date.now(), Date.now()).run();
+    await E.DB.prepare("UPDATE watches SET state = 'on' WHERE id = ?").bind(id).run();
+    await runInDurableObject(E.WATCHER.get(E.WATCHER.idFromName(keyId)), async (w: any) => { await solo(w, async () => { w.loadedAt = 0; w.launchNext = 0; for (const r of w.runs.values()) r.next = 0; await w.tick(Date.now()); }); });
+    expect(await E.DB.prepare('SELECT state FROM watches WHERE id = ?').bind(id).first('state')).toBe('on');
+    expect(await E.DB.prepare('SELECT COUNT(*) AS n FROM launches WHERE watch_id = ?').bind(id).first('n')).toBe(0);
+    // the sibling's launch fails: the place is free again, and this watch starts its machine
+    await E.DB.prepare("UPDATE launches SET state = 'failed' WHERE id = 'mch_sibling'").run();
+    await runInDurableObject(E.WATCHER.get(E.WATCHER.idFromName(keyId)), async (w: any) => { await solo(w, async () => { w.loadedAt = 0; w.launchNext = 0; for (const r of w.runs.values()) { r.next = 0; r.holdUntil = 0; } await w.tick(Date.now()); }); });
+    expect(await E.DB.prepare("SELECT COUNT(*) AS n FROM launches WHERE watch_id = ? AND state = 'created'").bind(id).first('n')).toBe(1);
+    // and the group now has its machine: a second watch of the group, on the same provider, gives up for good
+    const id2 = (await api('POST', '/watches', {keyId, name: 'Too late', mode: 'launch', every: 5, maxLaunch: 1, paused: true, spec: {configs: ['fake_1x_a100'], regions: ['test-east-1'], launch: {ssh_key: 'laptop', name: 'late'}, group: 'main', guard: false}})).data.id;
+    await E.DB.prepare("UPDATE watches SET state = 'on' WHERE id = ?").bind(id2).run();
+    await runInDurableObject(E.WATCHER.get(E.WATCHER.idFromName(keyId)), async (w: any) => { await solo(w, async () => { w.loadedAt = 0; w.launchNext = 0; for (const r of w.runs.values()) { r.next = 0; r.holdUntil = 0; } await w.tick(Date.now()); }); });
+    expect(await E.DB.prepare('SELECT state, stop_reason FROM watches WHERE id = ?').bind(id2).first()).toMatchObject({state: 'done', stop_reason: expect.stringMatching(/group "main" already has its machine/)});
+    MADE.clear(); await endAll();
+  });
+  it('checks launch settings with reads only, and says what would fail', async () => {
+    const before = await E.DB.prepare('SELECT COUNT(*) AS n FROM launches').first('n');
+    const good = await api('POST', `/keys/${keyId}/preflight`, {spec: {configs: ['fake_1x_a100'], regions: ['test-east-1'], launch: {ssh_key: 'laptop'}}});
+    expect(good.status).toBe(200); expect(good.data.checks.some((x: any) => x.level === 'fail')).toBe(false);
+    const bad = await api('POST', `/keys/${keyId}/preflight`, {spec: {configs: ['fake_1x_a100'], launch: {ssh_key: 'laptop', fail: 'preflight'}}});
+    expect(bad.data.checks[0]).toMatchObject({level: 'fail'});
+    expect((await api('POST', `/keys/${keyId}/preflight`, {spec: {configs: ['fake_1x_a100'], launch: {}}})).data).toMatchObject({error: 'launch_field', field: 'ssh_key'});
+    expect(await E.DB.prepare('SELECT COUNT(*) AS n FROM launches').first('n')).toBe(before);
   });
   it('never shows one person another person\'s rows', async () => {
     const inv = await api('POST', '/admin/users', {email: 'member@example.com'});

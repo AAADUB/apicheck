@@ -7,6 +7,7 @@ import type {Env} from './types';
 import {ProviderError} from './types';
 import {PROVIDERS as ADAPTERS} from './providers';
 import {mailReady, tell} from './notify';
+import {preflight} from './preflight';
 import {LIMITS, EVERY_MAX, providerOf, cleanLaunch, PARAMS} from '../../shared/providers.js';
 
 const MAX_KEYS = 50, MAX_WATCHES = 60;
@@ -42,6 +43,13 @@ async function validate(c: Ctx, provider: string, secret: string): Promise<{meta
   catch (e) { return providerFail(e); }
 }
 
+async function runPreflight(c: Ctx, k: any, A: any, w: {spec: Record<string, any>; max_launch: number}) {
+  if (dev(c) && k.provider !== 'fake') return [{level: 'warn', text: 'Local run: real providers are not asked.'}];
+  const secret = await openKey(c.env, new Uint8Array(k.key_enc), k.id, c.user.id);
+  try { return await preflight(A, ctxOf(secret, JSON.parse(k.meta || '{}')) as any, w); }
+  catch (e) { return providerFail(e); }
+}
+
 /* a watch as the person describes it, checked field by field; the error names the field */
 function cleanWatch(c: Ctx, b: any, provider: string, old?: any) {
   const P = providerOf(provider, dev(c)), lim = (LIMITS as any)[provider] || {min: 5, def: 30};
@@ -71,7 +79,8 @@ function cleanWatch(c: Ctx, b: any, provider: string, old?: any) {
   const group = mode === 'launch' ? clean(s.group, 40).toLowerCase() : '';
   if (group && !/^[a-z0-9][a-z0-9 ._-]*$/.test(group)) bad('group');
   return {name, mode, every, maxLaunch, renotify, maxPrice, startsAt, endsAt,
-    spec: {configs, regions, minLevel, params, launch, names, prices, currency: clean(s.currency, 3) || 'USD', boundRegion: clean(s.boundRegion, 100) || undefined, group: group || undefined}};
+    spec: {configs, regions, minLevel, params, launch, names, prices, currency: clean(s.currency, 3) || 'USD', boundRegion: clean(s.boundRegion, 100) || undefined, group: group || undefined,
+      guard: mode === 'launch' && s.guard === false ? false : undefined}};
 }
 
 export const appRoutes: Route[] = [
@@ -141,6 +150,14 @@ export const appRoutes: Route[] = [
     }
   }],
 
+  /* reads only: would a launch with these settings go through? Used by the watch form before saving. */
+  ['POST', /^\/api\/keys\/([\w-]+)\/preflight$/, async c => {
+    const k = await ownKey(c, c.params[0]), A = adapter(c, k.provider), b = c.body || {};
+    await limited(c.env, 'pre:' + c.user.id);
+    const w = cleanWatch(c, {...b, name: b.name || 'Launch check', mode: 'launch'}, k.provider);
+    return json({checks: await runPreflight(c, k, A, {spec: w.spec, max_launch: w.maxLaunch}), at: Date.now()});
+  }],
+
   /* ---------- watches ---------- */
   ['GET', /^\/api\/watches$/, async c => json({items: (await c.env.DB.prepare('SELECT w.*, k.label AS key_label FROM watches w JOIN keys k ON k.id = w.key_id WHERE w.user_id = ? ORDER BY w.state = \'on\' DESC, w.created_at DESC').bind(c.user.id).all()).results.map(watchRow)})],
   ['GET', /^\/api\/watches\/([\w-]+)$/, async c => {
@@ -195,6 +212,14 @@ export const appRoutes: Route[] = [
     c.exec.waitUntil(poke(c.env, w.key_id));
     return json({ok: true});
   }],
+  ['POST', /^\/api\/watches\/([\w-]+)\/preflight$/, async c => {
+    const w = await ownWatch(c, c.params[0]), k = await ownKey(c, w.key_id), A = adapter(c, k.provider);
+    await limited(c.env, 'pre:' + c.user.id);
+    const checks = await runPreflight(c, k, A, {spec: JSON.parse(w.spec), max_launch: w.max_launch});
+    const st = JSON.parse(w.status || '{}'); st.pre = {at: Date.now(), checks};
+    await c.env.DB.prepare('UPDATE watches SET status = ? WHERE id = ?').bind(JSON.stringify(st), w.id).run();
+    return json({checks, at: Date.now()});
+  }],
   ['POST', /^\/api\/watches\/([\w-]+)\/check$/, async c => {
     const w = await ownWatch(c, c.params[0]); if (w.state !== 'on') bad('not_running', 409);
     await poke(c.env, w.key_id, {now: true, watchId: w.id});
@@ -227,14 +252,21 @@ export const appRoutes: Route[] = [
     if (!A.instance) bad('no_machine', 409);
     await limited(c.env, 'cat:' + c.user.id);
     let d: Record<string, unknown> | null = null;
-    try { d = await A.instance!(ctxOf(await openKey(c.env, new Uint8Array(k.key_enc), k.id, c.user.id), JSON.parse(k.meta || '{}')), l.ext_id, l.region); } catch (e) { providerFail(e); }
+    try { d = await A.instance!(ctxOf(await openKey(c.env, new Uint8Array(k.key_enc), k.id, c.user.id), JSON.parse(k.meta || '{}')), l.ext_id, l.region); }
+    catch (e) { if (!(e instanceof ProviderError && e.status === 404)) providerFail(e); d = null; }   // 404: the provider no longer knows the machine
     const detail = {...JSON.parse(l.detail || '{}'), ...(d || {gone: true}), readAt: Date.now()};
-    await c.env.DB.prepare('UPDATE launches SET detail = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(detail), Date.now(), l.id).run();
-    return json(launchRow({...l, detail: JSON.stringify(detail)}));
+    // the provider says the machine is gone: it no longer counts against any limit
+    const ended = !d || /^(terminated|terminating|preempted|deleted|deleting)$/i.test(String(d.status || ''));
+    const state = ended && (l.state === 'created' || l.state === 'unknown') ? 'ended' : l.state;
+    await c.env.DB.batch([c.env.DB.prepare('UPDATE launches SET detail = ?, state = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(detail), state, Date.now(), l.id),
+      c.env.DB.prepare("UPDATE watches SET launched = (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state IN ('created', 'unknown')) WHERE id = ?").bind(l.watch_id, l.watch_id)]);
+    return json(launchRow({...l, state, detail: JSON.stringify(detail)}));
   }],
   ['DELETE', /^\/api\/launches\/([\w-]+)$/, async c => {
-    const l = await c.env.DB.prepare("SELECT watch_id FROM launches WHERE id = ? AND user_id = ? AND state IN ('failed', 'unknown', 'created')").bind(c.params[0], c.user.id).first<any>() || bad('not_found', 404);
-    // removing a launch from the list frees its place in the watch's limit: that is the way to resume after an unconfirmed launch
+    const l = await c.env.DB.prepare("SELECT watch_id, state FROM launches WHERE id = ? AND user_id = ? AND state IN ('failed', 'unknown', 'created', 'ended')").bind(c.params[0], c.user.id).first<any>() || bad('not_found', 404);
+    // a started machine counts until the provider confirms it is gone ("Read status" marks it ended); only then can it leave the list
+    if (l.state === 'created') bad('still_running', 409);
+    // removing an unconfirmed launch frees its place in the limits: that is the way to resume after you checked the console
     await c.env.DB.batch([c.env.DB.prepare('DELETE FROM launches WHERE id = ? AND user_id = ?').bind(c.params[0], c.user.id),
       c.env.DB.prepare("UPDATE watches SET launched = (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state IN ('created', 'unknown')) WHERE id = ? AND user_id = ?").bind(l.watch_id, l.watch_id, c.user.id),
       audit(c.env, c.user.id, 'launch_forget', c.params[0])]);
