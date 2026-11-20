@@ -43,6 +43,7 @@ export class Watcher extends DurableObject<Env> {
   guardList: Machine[] | null = null;   // machines in the provider account, for the account guard
   ignored = new Set<string>();           // machines terminated here a moment ago, still listed while they wind down
   odd = new Map<string, number>();       // refusals that do not read like "no capacity", counted
+  authTurn = 0;
   authFails = 0;                         // refusals of the key in a row; one alone may be an edge hiccup
   guardAt = 0;
   guardWarnAt = 0;
@@ -245,7 +246,8 @@ export class Watcher extends DurableObject<Env> {
         // the row stays findable: the next turns look it up by name again (reconcile), and the guard list is read afresh, in case the machine shows up late
         await this.env.DB.prepare("UPDATE launches SET state = 'failed', error = ?, updated_at = ? WHERE id = ?").bind(pe!.message + ' (checked by name: no machine was made)', Date.now(), id).run();
         this.guardList = null; r.reconAt = 0;
-        r.holdUntil = Date.now() + Math.max(30e3, pe!.retryAfter * 1000);
+        // a gateway error (502, 504, 520-524) may mean the request is still running behind it: wait longer before the next attempt
+        r.holdUntil = Date.now() + Math.max([502, 504, 520, 521, 522, 523, 524].includes(pe!.status) ? 90e3 : 30e3, pe!.retryAfter * 1000);
         await this.event(w, 'launch_failed', 'warn', 'Launch failed at the provider, will retry', pe!.message + ' No machine with the name ' + name + ' exists there.', now);
         return;
       }
@@ -329,11 +331,11 @@ export class Watcher extends DurableObject<Env> {
       SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?
       WHERE EXISTS (SELECT 1 FROM watches WHERE id = ? AND state = 'on' AND mode = 'launch')
         AND (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state IN ${L}) < ?
-        AND (SELECT COUNT(*) FROM launches WHERE user_id = ? AND provider = ? AND state IN ${L}) < ?
+        AND (SELECT COUNT(*) FROM launches WHERE user_id = ? AND provider = ? AND state IN ${L}) < 1
         AND (? = '' OR (SELECT COUNT(*) FROM launches WHERE user_id = ? AND grp = ? AND state IN ${L})
              < (SELECT COALESCE(MIN(max_launch), ?) FROM watches WHERE user_id = ? AND mode = 'launch' AND json_extract(spec, '$.group') = ?))`)
       .bind(id, w.user_id, w.id, w.key_id, w.provider, o.config, o.region, name, price, (w.spec.currency || 'USD'), g || null, now, now,
-        w.id, w.id, cap, w.user_id, w.provider, cap, g, w.user_id, g, cap, w.user_id, g).run();
+        w.id, w.id, cap, w.user_id, w.provider, g, w.user_id, g, cap, w.user_id, g).run();
     return !!r.meta.changes;
   }
   group(w: Watch): string { return typeof w.spec.group === 'string' ? w.spec.group : ''; }
@@ -348,13 +350,15 @@ export class Watcher extends DurableObject<Env> {
         (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state = 'unknown') AS wu,
         (SELECT COUNT(*) FROM launches WHERE user_id = ? AND provider = ? AND state IN ('created', 'unknown')) AS pc,
         (SELECT COUNT(*) FROM launches WHERE user_id = ? AND grp = ? AND state IN ('created', 'unknown')) AS gc,
+        (SELECT COUNT(*) FROM launches WHERE user_id = ? AND grp = ? AND state = 'unknown') AS gu,
         (SELECT COALESCE(MIN(max_launch), ?) FROM watches WHERE user_id = ? AND mode = 'launch' AND json_extract(spec, '$.group') = ?) AS gcap`)
-      .bind(w.id, w.id, w.id, w.user_id, w.provider, w.user_id, g, cap, w.user_id, g).first<any>();
+      .bind(w.id, w.id, w.id, w.user_id, w.provider, w.user_id, g, w.user_id, g, cap, w.user_id, g).first<any>();
     if (row.ws !== 'on') return {final: true, state: 'done', text: 'The watch is no longer on.'};
     if (row.wu) return {final: true, state: 'stopped', text: `A launch is still unconfirmed. It counts as a machine until you delete it on the Machines page.`};
     if (row.wc >= cap) return {final: true, state: 'done', text: `Started ${row.wc} of ${cap} machine${cap === 1 ? '' : 's'}.`};
+    if (g && row.gu && row.gc >= row.gcap) return {final: true, state: 'stopped', text: `A launch in the group "${g}" is unconfirmed. Check the provider console; if nothing was started, press "Nothing was started" on the Machines page, then resume.`};
     if (g && row.gc >= row.gcap) return {final: true, state: 'done', text: `The group "${g}" already has its machine${row.gcap === 1 ? '' : 's'}, started by another watch.`};
-    if (row.pc >= cap) return {final: true, state: 'stopped', text: `API Check already started a machine at ${w.provider} for you (or one is unconfirmed): one machine per provider. When it is terminated, refresh it on the Machines page, then resume.`};
+    if (row.pc >= 1) return {final: true, state: 'stopped', text: `API Check already started a machine at ${w.provider} for you (or one is unconfirmed): one machine per provider, always. When it is terminated, refresh it on the Machines page, then resume.`};
     return {final: false, state: 'done', text: 'Another launch is in flight; trying again in a few seconds.'};
   }
 
@@ -431,7 +435,8 @@ export class Watcher extends DurableObject<Env> {
     const pe = e instanceof ProviderError ? e : new ProviderError('http', (e as Error).message || 'Unknown error');
     r.fails++;
     if (pe.kind === 'rate' && pe.retryAfter) this.keyNext = now + pe.retryAfter * 1000;
-    if (pe.kind === 'auth' && ++this.authFails < 3) {
+    if (pe.kind === 'auth' && this.authTurn !== now) { this.authTurn = now; this.authFails++; }
+    if (pe.kind === 'auth' && this.authFails < 3) {
       // a single refusal can be an edge or proxy hiccup; the key is only given up after three in a row
       if (!r.err) { r.err = pe.message; r.errSince = now; await this.event(w, 'error', 'warn', 'Could not check: the key was refused once', pe.message, now); }
       return;

@@ -403,6 +403,15 @@ describe('workspace', () => {
     expect(await E.DB.prepare('SELECT state, stop_reason FROM watches WHERE id = ?').bind(id2).first()).toMatchObject({state: 'done', stop_reason: expect.stringMatching(/group "main" already has its machine/)});
     MADE.clear(); await endAll();
   });
+  it('never starts a second machine at one provider, whatever the watch allows', async () => {
+    MADE.clear(); await endAll();
+    const id = (await api('POST', '/watches', {keyId, name: 'Two allowed', mode: 'launch', every: 5, maxLaunch: 2, paused: true, spec: {configs: ['fake_1x_a100'], regions: ['test-east-1'], launch: {ssh_key: 'laptop'}, guard: false}})).data.id;
+    await E.DB.prepare("UPDATE watches SET state = 'on' WHERE id = ?").bind(id).run();
+    for (let i = 0; i < 2; i++) await runInDurableObject(E.WATCHER.get(E.WATCHER.idFromName(keyId)), async (w: any) => { await solo(w, async () => { w.loadedAt = 0; w.launchNext = 0; for (const r of w.runs.values()) { r.next = 0; r.holdUntil = 0; } await w.tick(Date.now()); }); });
+    expect(await E.DB.prepare("SELECT COUNT(*) AS n FROM launches WHERE watch_id = ? AND state = 'created'").bind(id).first('n')).toBe(1);
+    expect(await E.DB.prepare('SELECT stop_reason FROM watches WHERE id = ?').bind(id).first('stop_reason')).toMatch(/one machine per provider/);
+    MADE.clear(); await endAll();
+  });
   it('checks launch settings with reads only, and says what would fail', async () => {
     const before = await E.DB.prepare('SELECT COUNT(*) AS n FROM launches').first('n');
     const good = await api('POST', `/keys/${keyId}/preflight`, {spec: {configs: ['fake_1x_a100'], regions: ['test-east-1'], launch: {ssh_key: 'laptop'}}});

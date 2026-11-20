@@ -170,7 +170,8 @@ export const nebius: Provider = {
     const id = op && op.resourceId;
     // wait for the operation: placement failures arrive here
     let done = op && op.status ? op : null;
-    for (let i = 0; !done && i < 160; i++) { await sleep(1500); const o = await api(c, '/compute/v1/instances/operations/' + encodeURIComponent(op.id)).catch(() => null); if (o && o.status) done = o; }
+    const until = Date.now() + 240e3;
+    for (let i = 0; !done && Date.now() < until; i++) { await sleep(1500); const o = await api(c, '/compute/v1/instances/operations/' + encodeURIComponent(op.id)).catch(() => null); if (o && o.status) done = o; }
     if (done && done.status && done.status.code) {
       const msg = messageOf(done.status, '', 0), kind = classify(400, done.status, msg) || 'invalid';
       if (id) await remove(c, id);   // a failed VM keeps its name, its boot disk and its quota until deleted
@@ -193,6 +194,19 @@ export const nebius: Provider = {
       // a machine that failed to place is not a machine; launch() deletes those
       if (i && i.metadata && i.metadata.id && st === 'ERROR') { await remove(c, i.metadata.id); return null; }
       if (st === 'DELETING') return null;
+      // still being created: wait for the outcome (up to three minutes) rather than counting a machine that may yet fail to place
+      if (st === 'CREATING' || st === 'UPDATING') {
+        const until = Date.now() + 180e3;
+        for (let x = i; Date.now() < until; ) {
+          await sleep(5000);
+          x = await api(c, '/compute/v1/instances/' + encodeURIComponent(i.metadata.id)).catch(() => x);
+          const s2 = x && x.status && x.status.state;
+          if (s2 === 'RUNNING' || s2 === 'STARTING') return {extId: i.metadata.id, status: s2};
+          if (s2 === 'ERROR') { await remove(c, i.metadata.id); return null; }
+          if (s2 === 'DELETING') return null;
+        }
+        throw new Unclear(`Nebius is still creating machine ${i.metadata.id}.`, i.metadata.id);
+      }
       return i && i.metadata && i.metadata.id ? {extId: i.metadata.id, status: st} : null;
     } catch (e) { if (e instanceof ProviderError && (e.status === 404 || /not.?found/i.test(e.message))) return null; throw e; }
   },

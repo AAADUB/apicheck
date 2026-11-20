@@ -11,7 +11,7 @@ const BASE = 'https://api.runpod.io/v2';
 /* the image used when none is chosen: RunPod's official PyTorch 2.8 on CUDA 12.8.1, Ubuntu 24.04; it needs a host with CUDA 12.8 or newer */
 export const DEFAULT_IMAGE = 'runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404';
 /** the CUDA version an image tag names, RunPod style: cu1281 → 12.8, cu1300 → 13.0, cuda12.8.1 → 12.8 */
-export const cudaOf = (image: string) => { const m = String(image).match(/cu(?:da)?-?(1\d)\.?(\d)/i); return m ? `${m[1]}.${m[2]}` : ''; };
+export const cudaOf = (image: string) => { const m = String(image).match(/cu(?:da)?[:-]?(1\d)\.?(\d)/i); return m ? `${m[1]}.${m[2]}` : ''; };
 const classify: Classify = status => (status === 400 ? 'capacity' : status === 402 ? 'money' : status === 403 ? 'quota' : status === 422 || status === 404 || status === 409 || status === 413 ? 'invalid' : null);
 const H = (c: Ctx) => ({authorization: 'Bearer ' + c.secret.trim()});
 const get = (c: Ctx, path: string, memo = false) => call(c, BASE + path, {headers: H(c), memo}, classify);

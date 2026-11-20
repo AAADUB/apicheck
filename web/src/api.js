@@ -44,6 +44,7 @@ export class Api {
   launches() { return this.call('GET', '/launches'); }
   refreshLaunch(id) { return this.call('POST', `/launches/${enc(id)}/refresh`, {}); }
   forgetLaunch(id) { return this.call('DELETE', '/launches/' + enc(id)); }
+  endLaunch(id) { return this.call('POST', `/launches/${enc(id)}/end`, {}); }
   notices() { return this.call('GET', '/notices'); }
   testMail() { return this.call('POST', '/notify/test', {}); }
 }

@@ -54,6 +54,9 @@ export default {
     exec.waitUntil((async () => {
       const keys = (await env.DB.prepare("SELECT DISTINCT w.key_id FROM watches w JOIN keys k ON k.id = w.key_id WHERE w.state = 'on' AND k.status = 'ok'").all<{key_id: string}>()).results;
       await Promise.all(keys.map(k => poke(env, k.key_id)));
+      // a launch still pending after ten minutes was cut off with no one left to settle it: it counts as unconfirmed until a person looks
+      const t = Date.now();
+      await env.DB.prepare("UPDATE launches SET state = 'unknown', error = 'Interrupted with no answer recorded. Check the provider console for a machine named ' || name || '.', updated_at = ? WHERE state = 'pending' AND created_at < ?").bind(t, t - 10 * 60e3).run();
       if (new Date(ev.scheduledTime).getUTCMinutes() === 7) {
         const now = Date.now(), d = 86400e3;
         await env.DB.batch([
@@ -61,9 +64,7 @@ export default {
           env.DB.prepare('DELETE FROM invites WHERE expires_at < ?').bind(now - 30 * d),
           env.DB.prepare('DELETE FROM events WHERE at < ?').bind(now - 120 * d),
           env.DB.prepare('DELETE FROM windows WHERE end_at IS NOT NULL AND end_at < ?').bind(now - 120 * d),
-          env.DB.prepare('DELETE FROM notices WHERE at < ?').bind(now - 180 * d),
-          // a launch still pending after ten minutes was cut off with no one left to settle it: it counts as unconfirmed until a person looks
-          env.DB.prepare("UPDATE launches SET state = 'unknown', error = 'Interrupted with no answer recorded. Check the provider console for a machine named ' || name || '.', updated_at = ? WHERE state = 'pending' AND created_at < ?").bind(now, now - 10 * 60e3)
+          env.DB.prepare('DELETE FROM notices WHERE at < ?').bind(now - 180 * d)
         ]);
       }
     })());

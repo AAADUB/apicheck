@@ -43,6 +43,10 @@ async function validate(c: Ctx, provider: string, secret: string): Promise<{meta
   catch (e) { return providerFail(e); }
 }
 
+async function keyFor(c: Ctx, l: any) {
+  const own = l.key_id ? await c.env.DB.prepare("SELECT * FROM keys WHERE id = ? AND user_id = ? AND status = 'ok'").bind(l.key_id, c.user.id).first<any>() : null;
+  return own || (await c.env.DB.prepare("SELECT * FROM keys WHERE user_id = ? AND provider = ? AND status = 'ok' ORDER BY created_at LIMIT 1").bind(c.user.id, l.provider).first<any>()) || bad('no_key_for_machine', 409);
+}
 async function runPreflight(c: Ctx, k: any, A: any, w: {spec: Record<string, any>; max_launch: number}) {
   if (dev(c) && k.provider !== 'fake') return [{level: 'warn', text: 'Local run: real providers are not asked.'}];
   const secret = await openKey(c.env, new Uint8Array(k.key_enc), k.id, c.user.id);
@@ -247,8 +251,9 @@ export const appRoutes: Route[] = [
   ['GET', /^\/api\/launches$/, async c => json({items: ((await c.env.DB.prepare('SELECT l.*, w.name AS watch_name, k.label AS key_label FROM launches l LEFT JOIN watches w ON w.id = l.watch_id LEFT JOIN keys k ON k.id = l.key_id WHERE l.user_id = ? ORDER BY l.created_at DESC LIMIT 200').bind(c.user.id).all()).results as any[]).map(launchRow)})],
   ['POST', /^\/api\/launches\/([\w-]+)\/refresh$/, async c => {
     const l = await c.env.DB.prepare('SELECT * FROM launches WHERE id = ? AND user_id = ?').bind(c.params[0], c.user.id).first<any>() || bad('not_found', 404);
-    if (!l.ext_id || !l.key_id) bad('no_machine', 409);
-    const k = await ownKey(c, l.key_id), A = adapter(c, k.provider);
+    if (!l.ext_id) bad('no_machine', 409);
+    // the key that started it, or, if that one is gone or refused, any working key of the same provider
+    const k = await keyFor(c, l), A = adapter(c, k.provider);
     if (!A.instance) bad('no_machine', 409);
     await limited(c.env, 'cat:' + c.user.id);
     let d: Record<string, unknown> | null = null;
@@ -256,11 +261,21 @@ export const appRoutes: Route[] = [
     catch (e) { if (!(e instanceof ProviderError && e.status === 404)) providerFail(e); d = null; }   // 404: the provider no longer knows the machine
     const detail = {...JSON.parse(l.detail || '{}'), ...(d || {gone: true}), readAt: Date.now()};
     // the provider says the machine is gone: it no longer counts against any limit
-    const ended = !d || /^(terminated|terminating|preempted|deleted|deleting)$/i.test(String(d.status || ''));
+    const ended = !d || /^(terminated|terminating|preempted|deleted|deleting|error)$/i.test(String(d.status || ''));
     const state = ended && (l.state === 'created' || l.state === 'unknown') ? 'ended' : l.state;
     await c.env.DB.batch([c.env.DB.prepare('UPDATE launches SET detail = ?, state = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(detail), state, Date.now(), l.id),
       c.env.DB.prepare("UPDATE watches SET launched = (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state IN ('created', 'unknown')) WHERE id = ?").bind(l.watch_id, l.watch_id)]);
     return json(launchRow({...l, state, detail: JSON.stringify(detail)}));
+  }],
+  /* when no working key of the provider is left to ask, a person may say the machine is gone; with a working key, "Read status" decides */
+  ['POST', /^\/api\/launches\/([\w-]+)\/end$/, async c => {
+    const l = await c.env.DB.prepare("SELECT * FROM launches WHERE id = ? AND user_id = ? AND state = 'created'").bind(c.params[0], c.user.id).first<any>() || bad('not_found', 404);
+    const ok = await c.env.DB.prepare("SELECT id FROM keys WHERE user_id = ? AND provider = ? AND status = 'ok' LIMIT 1").bind(c.user.id, l.provider).first();
+    if (ok) bad('read_status_first', 409);
+    await c.env.DB.batch([c.env.DB.prepare("UPDATE launches SET state = 'ended', error = 'Marked as terminated by hand (no working key to ask).', updated_at = ? WHERE id = ?").bind(Date.now(), l.id),
+      c.env.DB.prepare("UPDATE watches SET launched = (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state IN ('created', 'unknown')) WHERE id = ?").bind(l.watch_id, l.watch_id),
+      audit(c.env, c.user.id, 'launch_end_by_hand', l.id)]);
+    return json({ok: true});
   }],
   ['DELETE', /^\/api\/launches\/([\w-]+)$/, async c => {
     const l = await c.env.DB.prepare("SELECT watch_id, state FROM launches WHERE id = ? AND user_id = ? AND state IN ('failed', 'unknown', 'created', 'ended')").bind(c.params[0], c.user.id).first<any>() || bad('not_found', 404);
