@@ -40,12 +40,13 @@ for (const [pkg, rename] of [['@fontsource-variable/funnel-display', ["'Funnel D
 const allCss = fontCss + css, cssName = `app.${hash(allCss)}.css`;
 writeFileSync(join(out, 'assets', jsName), bundle); writeFileSync(join(out, 'assets', cssName), allCss);
 writeFileSync(join(out, 'index.html'), tpl.replace('<!--CSS-->', () => `<link rel="stylesheet" href="/assets/${cssName}">`).replace('<!--JS-->', () => `<script src="/assets/${jsName}" defer></script>`));
-writeFileSync(join(out, 'robots.txt'), 'User-agent: *\nDisallow: /\n');
+// Not blocked here on purpose: a crawler must be able to fetch a page to read its noindex. Every response carries X-Robots-Tag: noindex.
+writeFileSync(join(out, 'robots.txt'), '# Private workspace. Every page answers with X-Robots-Tag: noindex.\nUser-agent: *\nAllow: /\n');
 writeFileSync(join(out, '_headers'), `/*
   Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
   Strict-Transport-Security: max-age=63072000; includeSubDomains
   X-Content-Type-Options: nosniff
-  X-Robots-Tag: noindex, nofollow
+  X-Robots-Tag: noindex, nofollow, noarchive, nosnippet, noimageindex
   Referrer-Policy: no-referrer
   Permissions-Policy: camera=(), microphone=(), geolocation=()
 /assets/*

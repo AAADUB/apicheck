@@ -9,7 +9,7 @@ export type Handler = (c: Ctx) => Promise<Response> | Response;
 export type Route = [string, RegExp, Handler, (false | 'admin')?];
 
 export class HttpError extends Error { constructor(public status: number, public code: string, public extra?: Record<string, unknown>) { super(code); } }
-export const json = (data: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(data), {status, headers: {'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-robots-tag': 'noindex, nofollow', 'strict-transport-security': 'max-age=63072000; includeSubDomains', ...headers}});
+export const json = (data: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(data), {status, headers: {'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-robots-tag': 'noindex, nofollow, noarchive, nosnippet, noimageindex', 'strict-transport-security': 'max-age=63072000; includeSubDomains', ...headers}});
 export const bad = (code: string, status = 400, extra?: Record<string, unknown>): never => { throw new HttpError(status, code, extra); };
 export const mailOk = (v: unknown): v is string => typeof v === 'string' && v.length <= 254 && /^[\x21-\x7e]+$/.test(v) && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v);
 export const passOk = (v: unknown): v is string => typeof v === 'string' && v.length >= 8 && v.length <= 200;

@@ -36,4 +36,5 @@ Practices adopted: separate "seen" from "launched"; write the launch before call
 
 ## Changelog
 
+- 20.11.2026 — v1.1: search engines: noindex, nofollow, noarchive on every page, file and API answer (header and meta); robots.txt no longer blocks crawling, so the noindex is seen (Google: a page blocked in robots.txt can still be listed).
 - 20.11.2026 — v1: four providers, watches with notify or launch, availability board, machines, activity, keys, users, settings; deployed.

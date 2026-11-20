@@ -218,6 +218,10 @@ describe('workspace', () => {
     expect((await api('GET', '/admin/users')).status).toBe(403);
     cookie = mine;
   });
+  it('tells search engines to stay out of every API answer', async () => {
+    const res = await SELF.fetch(ORIGIN + '/api/auth/state');
+    expect(res.headers.get('x-robots-tag')).toMatch(/noindex/);
+  });
   it('refuses writes without the CSRF header', async () => {
     const res = await SELF.fetch(ORIGIN + '/api/keys', {method: 'POST', headers: {cookie, 'content-type': 'application/json'}, body: '{}'});
     expect(res.status).toBe(403);

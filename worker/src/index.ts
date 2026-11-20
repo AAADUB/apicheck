@@ -43,7 +43,11 @@ async function api(req: Request, env: Env, exec: ExecutionContext): Promise<Resp
 export default {
   async fetch(req: Request, env: Env, exec: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
-    return url.pathname.startsWith('/api/') ? api(req, env, exec) : env.ASSETS.fetch(req);
+    if (url.pathname.startsWith('/api/')) return api(req, env, exec);
+    // the workspace is private: every page, file and fallback says so to search engines, whatever the static headers do
+    const res = await env.ASSETS.fetch(req), out = new Response(res.body, res);
+    out.headers.set('x-robots-tag', 'noindex, nofollow, noarchive, nosnippet, noimageindex');
+    return out;
   },
   /* Every minute: wake the loop of every key that has a running watch (an alarm can be lost when an object is moved), and once an hour tidy old rows. */
   async scheduled(ev: ScheduledController, env: Env, exec: ExecutionContext) {
