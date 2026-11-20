@@ -67,8 +67,11 @@ function cleanWatch(c: Ctx, b: any, provider: string, old?: any) {
   if ((startsAt != null && !(startsAt > 1.6e12 && startsAt < 4e12)) || (endsAt != null && !(endsAt > 1.6e12 && endsAt < 4e12))) bad('dates');
   if (endsAt != null && (endsAt <= Date.now() || (startsAt && endsAt <= startsAt))) bad('dates');
   const name = clean(b.name, 80) || clean(old && old.name, 80) || bad('name');
+  // watches with the same group share one limit: across keys and providers, the group starts at most this many machines in total
+  const group = mode === 'launch' ? clean(s.group, 40).toLowerCase() : '';
+  if (group && !/^[a-z0-9][a-z0-9 ._-]*$/.test(group)) bad('group');
   return {name, mode, every, maxLaunch, renotify, maxPrice, startsAt, endsAt,
-    spec: {configs, regions, minLevel, params, launch, names, prices, currency: clean(s.currency, 3) || 'USD', boundRegion: clean(s.boundRegion, 100) || undefined}};
+    spec: {configs, regions, minLevel, params, launch, names, prices, currency: clean(s.currency, 3) || 'USD', boundRegion: clean(s.boundRegion, 100) || undefined, group: group || undefined}};
 }
 
 export const appRoutes: Route[] = [
@@ -168,7 +171,11 @@ export const appRoutes: Route[] = [
       if (b.state !== 'on' && b.state !== 'paused') bad('state');
       if (b.state === 'on') {
         const k = await ownKey(c, w.key_id); if (k.status === 'error') bad('key_broken', 409);
-        if (w.mode === 'launch' && w.launched >= w.max_launch) bad('launch_done', 409);
+        if (w.mode === 'launch') {
+          const n = await c.env.DB.prepare("SELECT COUNT(*) AS n, SUM(state = 'unknown') AS u FROM launches WHERE watch_id = ? AND state IN ('pending', 'created', 'unknown')").bind(w.id).first<any>();
+          if (n.u) bad('launch_unknown', 409);
+          if (n.n >= w.max_launch) bad('launch_done', 409);
+        }
         if (w.ends_at && w.ends_at <= now) bad('dates');
       }
       await c.env.DB.batch([c.env.DB.prepare("UPDATE watches SET state = ?, stop_reason = '', updated_at = ? WHERE id = ?").bind(b.state, now, w.id),
@@ -226,8 +233,11 @@ export const appRoutes: Route[] = [
     return json(launchRow({...l, detail: JSON.stringify(detail)}));
   }],
   ['DELETE', /^\/api\/launches\/([\w-]+)$/, async c => {
-    const r = await c.env.DB.prepare("DELETE FROM launches WHERE id = ? AND user_id = ? AND state IN ('failed', 'unknown', 'created')").bind(c.params[0], c.user.id).run();
-    if (!r.meta.changes) bad('not_found', 404);
+    const l = await c.env.DB.prepare("SELECT watch_id FROM launches WHERE id = ? AND user_id = ? AND state IN ('failed', 'unknown', 'created')").bind(c.params[0], c.user.id).first<any>() || bad('not_found', 404);
+    // removing a launch from the list frees its place in the watch's limit: that is the way to resume after an unconfirmed launch
+    await c.env.DB.batch([c.env.DB.prepare('DELETE FROM launches WHERE id = ? AND user_id = ?').bind(c.params[0], c.user.id),
+      c.env.DB.prepare("UPDATE watches SET launched = (SELECT COUNT(*) FROM launches WHERE watch_id = ? AND state IN ('created', 'unknown')) WHERE id = ? AND user_id = ?").bind(l.watch_id, l.watch_id, c.user.id),
+      audit(c.env, c.user.id, 'launch_forget', c.params[0])]);
     return json({ok: true});
   }],
 

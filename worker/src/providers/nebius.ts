@@ -4,7 +4,7 @@
 // Launch: POST /compute/v1/instances returns an operation; a placement failure says "Not enough resources", either on the call or on the operation.
 import {ProviderError} from '../types';
 import type {Provider, Ctx, Catalog, Config, Offer, Level} from '../types';
-import {call, messageOf, Unclear} from './net';
+import {call, messageOf, Unclear, prep} from './net';
 import type {Classify} from './net';
 
 const API = 'https://api.nebius.cloud', AUTH = 'https://auth.eu.nebius.com:443/oauth2/token/exchange';
@@ -87,6 +87,8 @@ async function advice(c: Ctx, tenant: string, kind: string): Promise<{offers: Of
 }
 const PRICE: Record<string, number> = {'gpu-h100-sxm': 4.5, 'gpu-h200-sxm': 5.4, 'gpu-b200-sxm': 8.5, 'gpu-b200-sxm-a': 8.5, 'gpu-b300-sxm': 9.5};
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+/* Nebius names: lower case letters, digits and dashes */
+const vmName = (n: string) => n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'apicheck';
 
 export const nebius: Provider = {
   id: 'nebius',
@@ -128,9 +130,10 @@ export const nebius: Provider = {
     const project = c.meta && c.meta.projects && c.meta.projects[p.region];
     if (!project) throw new ProviderError('invalid', `No project for region ${p.region}. Give the service account access to that region's project and check the key again.`);
     let subnet = s.subnet && (s.subnet_region ? s.subnet_region === p.region : true) ? s.subnet : '';
-    if (!subnet) { const xs = await list(c, '/vpc/v1/subnets?parentId=' + encodeURIComponent(project), true); subnet = xs[0] && xs[0].metadata.id; }
+    await prep(token(c));   // a token problem must not look like an unclear launch
+    if (!subnet) { const xs = await prep(list(c, '/vpc/v1/subnets?parentId=' + encodeURIComponent(project), true)); subnet = xs[0] && xs[0].metadata.id; }
     if (!subnet) throw new ProviderError('invalid', `No subnet in ${p.region}.`);
-    const suffix = Math.random().toString(36).slice(2, 6), name = (p.name + '-' + suffix).toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 60);
+    const name = vmName(p.name);
     const keys = String(s.ssh_keys || '').split('\n').map(x => x.trim()).filter(Boolean), user = s.username || 'ubuntu';
     let cloud = s.user_data || '';
     if (!cloud) {
@@ -145,7 +148,7 @@ export const nebius: Provider = {
     };
     if (s.filesystem && (!s.filesystem_region || s.filesystem_region === p.region)) spec.filesystems = [{attachMode: 'READ_WRITE', mountTag: 'data', existingFilesystem: {id: s.filesystem}}];
     if (kindOf(c, p.spec) === 'preemptible') { spec.preemptible = {onPreemption: 'STOP'}; spec.followsSpotPrice = {}; spec.recoveryPolicy = 'FAIL'; }
-    const op = await api(c, '/compute/v1/instances', {method: 'POST', body: JSON.stringify({metadata: {parentId: project, name, labels: {managed_by: 'apicheck'}}, spec}), headers: {'x-idempotency-key': crypto.randomUUID()}});
+    const op = await api(c, '/compute/v1/instances', {method: 'POST', body: JSON.stringify({metadata: {parentId: project, name, labels: {managed_by: 'apicheck'}}, spec}), headers: {'x-idempotency-key': String(p.spec.launchId || crypto.randomUUID())}});
     const id = op && op.resourceId;
     // wait for the operation: placement failures arrive here
     let done = op && op.status ? op : null;
@@ -158,9 +161,20 @@ export const nebius: Provider = {
     if (!id) throw new ProviderError('http', 'Nebius accepted the request but returned no instance id.');
     if (!done) {
       const inst = await api(c, '/compute/v1/instances/' + encodeURIComponent(id)).catch(() => null), st = inst && inst.status && inst.status.state;
-      if (st !== 'RUNNING' && st !== 'STARTING') throw new Unclear(`Nebius is still creating machine ${id} (state ${st || 'unknown'}); it may still start or fail.`);
+      if (st !== 'RUNNING' && st !== 'STARTING') throw new Unclear(`Nebius is still creating machine ${id} (state ${st || 'unknown'}); it may still start or fail.`, id);
     }
     return {extId: id, name, detail: {project, region: p.region, operation: op.id}};
+  },
+  async find(c, p) {
+    const project = c.meta && c.meta.projects && c.meta.projects[p.region];
+    if (!project) return null;
+    try {
+      const i = await api(c, '/compute/v1/instances/get-by-name?parentId=' + encodeURIComponent(project) + '&name=' + encodeURIComponent(vmName(p.name)));
+      const st = i && i.status && i.status.state;
+      // a machine that failed to place is not a machine; launch() deletes those
+      if (i && i.metadata && i.metadata.id && st === 'ERROR') { await api(c, '/compute/v1/instances/' + encodeURIComponent(i.metadata.id), {method: 'DELETE'}).catch(() => null); return null; }
+      return i && i.metadata && i.metadata.id ? {extId: i.metadata.id, status: st} : null;
+    } catch (e) { if (e instanceof ProviderError && (e.status === 404 || /not.?found/i.test(e.message))) return null; throw e; }
   },
   async instance(c, extId) {
     const i = await api(c, '/compute/v1/instances/' + encodeURIComponent(extId));

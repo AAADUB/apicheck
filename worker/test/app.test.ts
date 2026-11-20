@@ -7,6 +7,8 @@ import {lambda} from '../src/providers/lambda';
 import {upcloud} from '../src/providers/upcloud';
 import {runpod} from '../src/providers/runpod';
 import {nebius, readCreds} from '../src/providers/nebius';
+import {hyperstack} from '../src/providers/hyperstack';
+import {MADE} from '../src/providers/fake';
 import {ProviderError} from '../src/types';
 import {cleanLaunch} from '../../shared/providers.js';
 
@@ -120,6 +122,42 @@ describe('Nebius adapter', () => {
   });
 });
 
+describe('Hyperstack adapter', () => {
+  const flavors = {status: true, data: [
+    {gpu: 'H100-80G-SXM5', region_name: 'CANADA-1', flavors: [{name: 'n3-H100-SXM5x8', region_name: 'CANADA-1', gpu: 'H100-80G-SXM5', gpu_count: 8, cpu: 192, ram: 1800, disk: 100, ephemeral: 32000, stock_available: false}]},
+    {gpu: 'H100-80G-SXM5', region_name: 'US-1', flavors: [{name: 'n3-H100-SXM5x8', region_name: 'US-1', gpu: 'H100-80G-SXM5', gpu_count: 8, cpu: 192, ram: 960, disk: 100, ephemeral: 20000, stock_available: true}]},
+    {gpu: '', region_name: 'CANADA-1', flavors: [{name: 'n1-cpu-small', region_name: 'CANADA-1', gpu: '', gpu_count: 0, cpu: 4, ram: 4, stock_available: true}]}]};
+  const stocks = {stocks: [{region: 'US-1', 'stock-type': 'GPU', models: [{model: 'H100-80G-SXM5', available: '8', configurations: {'1x': 8, '2x': 4, '4x': 2, '8x': 1, '10x': 0}}]}]};
+  const envs = {environments: [{name: 'us', region: 'US-1'}, {name: 'ca', region: 'CANADA-1'}], count: 2};
+  const keys = {keypairs: [{name: 'laptop', environment: {name: 'us', region: 'US-1'}}], count: 1};
+  const images = {images: [{region_name: 'US-1', type: 'Ubuntu', images: [{name: 'Ubuntu Server 22.04 LTS R535 CUDA 12.2', region_name: 'US-1'}, {name: 'Ubuntu Server 24.04 LTS R570 CUDA 12.8 with Docker', region_name: 'US-1'}]}]};
+  it('reads stock per flavor and region, and only counts regions it could launch in', async () => {
+    const f = mock([['/core/flavors', 200, flavors], ['/core/stocks', 200, stocks], ['/core/environments', 200, envs], ['/core/keypairs', 200, keys]]);
+    const o = await hyperstack.offers(ctx(f, 'hs-key-0000000001'), {mode: 'notify', spec: {}});
+    expect(o).toEqual([{config: 'n3-H100-SXM5x8', region: 'US-1', level: 'yes', note: '1 machine of 8 GPUs deployable'}]);
+    expect(f.log[0].init.headers.api_key).toBe('hs-key-0000000001');
+    const g = mock([['/core/flavors', 200, {data: [{...flavors.data[0], flavors: [{...flavors.data[0].flavors[0], stock_available: true}]}]}], ['/core/stocks', 200, stocks], ['/core/environments', 200, envs], ['/core/keypairs', 200, keys]]);
+    expect(await hyperstack.offers(ctx(g, 'hs-key-0000000002'), {mode: 'launch', spec: {}})).toEqual([]);   // in stock in CANADA-1, but no key there
+  });
+  it('launches with the region\'s environment, key and image, and settles errors', async () => {
+    const f = mock([['/core/environments', 200, envs], ['/core/keypairs', 200, keys], ['/core/images', 200, images], ['/core/virtual-machines/77', 200, {instance: {id: 77, status: 'ACTIVE'}}], ['/core/virtual-machines', 200, {status: true, instances: [{id: 77, name: 'comp-abc123', status: 'CREATING'}]}]]);
+    const plan = {config: 'n3-H100-SXM5x8', region: 'US-1', name: 'comp-abc123', spec: {launch: {public_ip: true}}};
+    const r = await hyperstack.launch(ctx(f, 'hs-key-0000000003'), plan);
+    expect(r).toMatchObject({extId: '77', detail: {status: 'ACTIVE', environment: 'us', key: 'laptop', image: 'Ubuntu Server 24.04 LTS R570 CUDA 12.8 with Docker'}});
+    const body = JSON.parse(f.log.find(h => h.init.method === 'POST')!.init.body);
+    expect(body).toMatchObject({name: 'comp-abc123', environment_name: 'us', flavor_name: 'n3-H100-SXM5x8', key_name: 'laptop', count: 1, assign_floating_ip: true});
+    expect(body.security_rules[0]).toMatchObject({direction: 'ingress', protocol: 'tcp', port_range_min: 22, port_range_max: 22});
+    expect(await kindOf(hyperstack.launch(ctx(f, 'hs-key-0000000004'), {...plan, region: 'CANADA-1'}))).toBe('invalid');   // no key in that environment
+    const err = (status: number, message: string) => mock([['/core/environments', 200, envs], ['/core/keypairs', 200, keys], ['/core/images', 200, images], ['/core/virtual-machines', status, {status: false, message, error_reason: 'bad_request'}]]);
+    expect(await kindOf(hyperstack.launch(ctx(err(400, 'Insufficient balance to create the resource'), 'hs-key-0000000005'), plan))).toBe('money');
+    expect(await kindOf(hyperstack.launch(ctx(err(400, 'Not enough GPUs in stock for this flavor'), 'hs-key-0000000006'), plan))).toBe('capacity');
+    expect(await kindOf(hyperstack.launch(ctx(err(401, 'Unauthorized'), 'hs-key-0000000007'), plan))).toBe('auth');
+    expect(await kindOf(hyperstack.launch(ctx(err(429, ''), 'hs-key-0000000008'), plan))).toBe('rate');
+    const found = await hyperstack.find(ctx(mock([['/core/virtual-machines', 200, {instances: [{id: 9, name: 'comp-abc123x', status: 'ACTIVE'}, {id: 8, name: 'comp-abc123', status: 'BUILD'}]}]]), 'hs-key-0000000009'), plan);
+    expect(found).toEqual({extId: '8', status: 'BUILD'});
+  });
+});
+
 describe('launch settings', () => {
   it('cleans fields by the provider form', () => {
     expect(cleanLaunch('lambda', {ssh_key: 'laptop', image: '', name: '  comp  ', extra: 'dropped'})).toEqual({ssh_key: 'laptop', name: 'comp'});
@@ -136,6 +174,8 @@ const api = async (method: string, path: string, body?: unknown) => {
   const sc = res.headers.get('set-cookie'); if (sc) cookie = sc.split(';')[0];
   return {status: res.status, data: await res.json() as any};
 };
+/* the engine runs one turn at a time (alarm() holds `busy`); a test turn waits for any alarm turn the API's poke started, and holds it too */
+const solo = async (w: any, fn: () => Promise<void>) => { while (w.busy) await new Promise(r => setTimeout(r, 20)); w.busy = true; try { w.keyNext = 0; for (const r of w.runs.values()) { r.reconAt = 0; r.holdUntil = 0; } await fn(); } finally { w.busy = false; } };
 const at = (sec: number) => { const base = Math.floor(Date.now() / 60000) * 60000 + 60000; return base + sec * 1000; };
 
 describe('workspace', () => {
@@ -206,6 +246,55 @@ describe('workspace', () => {
     const wr = await E.DB.prepare('SELECT state, stop_reason FROM watches WHERE id = ?').bind(r.data.id).first();
     expect(wr.state).toBe('stopped'); expect(wr.stop_reason).toMatch(/account may not/);
     expect((await E.DB.prepare("SELECT state FROM launches WHERE watch_id = ?").bind(r.data.id).first('state'))).toBe('failed');
+  });
+  it('settles an unclear launch by name and never starts a second machine', async () => {
+    const mk = async (fail: string, extra: any = {}) => (await api('POST', '/watches', {keyId, name: 'Unclear ' + fail, mode: 'launch', every: 5, maxLaunch: 1, spec: {configs: ['fake_1x_a100'], regions: ['test-east-1'], launch: {ssh_key: 'laptop', fail}, ...extra}})).data.id;
+    const run = async () => { const stub = E.WATCHER.get(E.WATCHER.idFromName(keyId)); await runInDurableObject(stub, async (w: any) => { await solo(w, async () => { w.loadedAt = 0; w.launchNext = 0; for (const r of w.runs.values()) r.next = 0; await w.tick(Date.now()); }); }); };
+    const state = async (id: string) => ({w: await E.DB.prepare('SELECT state, launched, stop_reason FROM watches WHERE id = ?').bind(id).first(), l: (await E.DB.prepare('SELECT state, ext_id, name FROM launches WHERE watch_id = ?').bind(id).all()).results});
+    // timed out, but the machine exists: found by name and counted, nothing more is started
+    const a = await mk('timeout_made'); await run();
+    let s = await state(a);
+    expect(s.l).toHaveLength(1); expect(s.l[0].state).toBe('created'); expect(s.l[0].ext_id).toBe(MADE.get(s.l[0].name));
+    expect(s.w).toMatchObject({state: 'done', launched: 1});
+    // timed out and nothing there: unknown, the watch stops, and it cannot be resumed until the launch is deleted
+    const b = await mk('timeout'); await run();
+    s = await state(b);
+    expect(s.l).toHaveLength(1); expect(s.l[0].state).toBe('unknown'); expect(s.w).toMatchObject({state: 'stopped'});
+    expect((await api('PATCH', '/watches/' + b, {state: 'on'})).data.error).toBe('launch_unknown');
+    const lid = (await E.DB.prepare('SELECT id FROM launches WHERE watch_id = ?').bind(b).first('id'));
+    expect((await api('DELETE', '/launches/' + lid)).status).toBe(200);
+    expect((await api('PATCH', '/watches/' + b, {state: 'paused'})).status).toBe(200);
+    // a server error with no machine behind it: failed, and the watch keeps hunting
+    const c5 = await mk('5xx'); await run();
+    s = await state(c5);
+    expect(s.l).toHaveLength(1); expect(s.l[0].state).toBe('failed'); expect(s.w.state).toBe('on');
+    await E.DB.prepare("UPDATE watches SET state = 'paused' WHERE id IN (?, ?)").bind(c5, a).run();
+  });
+  it('picks up a launch a restart interrupted', async () => {
+    const id = (await api('POST', '/watches', {keyId, name: 'Interrupted', mode: 'launch', every: 5, maxLaunch: 1, paused: true, spec: {configs: ['fake_1x_a100'], regions: ['test-east-1'], launch: {ssh_key: 'laptop'}}})).data.id;
+    const old = Date.now() - 10 * 60e3, u = (await E.DB.prepare('SELECT user_id FROM watches WHERE id = ?').bind(id).first('user_id'));
+    MADE.set('apicheck-left01', 'test-left01');
+    await E.DB.prepare("INSERT INTO launches (id, user_id, watch_id, key_id, provider, target, region, name, state, created_at, updated_at) VALUES ('mch_left01', ?, ?, ?, 'fake', 'fake_1x_a100', 'test-east-1', 'apicheck-left01', 'pending', ?, ?)").bind(u, id, keyId, old, old).run();
+    await E.DB.prepare("UPDATE watches SET state = 'on' WHERE id = ?").bind(id).run();
+    const stub = E.WATCHER.get(E.WATCHER.idFromName(keyId));
+    await runInDurableObject(stub, async (w: any) => { await solo(w, async () => { w.loadedAt = 0; w.launchNext = 0; for (const r of w.runs.values()) r.next = 0; await w.tick(Date.now()); }); });
+    const l = (await E.DB.prepare('SELECT state, ext_id FROM launches WHERE watch_id = ?').bind(id).all()).results;
+    expect(l).toEqual([{state: 'created', ext_id: 'test-left01'}]);
+    expect(await E.DB.prepare('SELECT state FROM watches WHERE id = ?').bind(id).first('state')).toBe('done');
+  });
+  it('lets a group of watches on different keys start one machine in total', async () => {
+    const k2 = (await api('POST', '/keys', {provider: 'fake', label: 'Second', key: 'test-key-value-second'})).data.id;
+    const body = (k: string, n: string) => ({keyId: k, name: n, mode: 'launch', every: 5, maxLaunch: 1, paused: true, spec: {configs: ['fake_1x_a100'], regions: ['test-east-1'], launch: {ssh_key: 'laptop'}, group: 'Competition'}});
+    const w1 = (await api('POST', '/watches', body(keyId, 'Group one'))).data.id, w2 = (await api('POST', '/watches', body(k2, 'Group two'))).data.id;
+    expect((await E.DB.prepare('SELECT spec FROM watches WHERE id = ?').bind(w1).first('spec'))).toContain('"group":"competition"');
+    await E.DB.prepare("UPDATE watches SET state = 'on' WHERE id IN (?, ?)").bind(w1, w2).run();
+    for (const k of [keyId, k2]) await runInDurableObject(E.WATCHER.get(E.WATCHER.idFromName(k)), async (w: any) => { await solo(w, async () => { w.keyId = k; w.loadedAt = 0; w.launchNext = 0; for (const r of w.runs.values()) r.next = 0; await w.tick(Date.now()); }); });
+    const n = await E.DB.prepare("SELECT COUNT(*) AS n FROM launches WHERE watch_id IN (?, ?) AND state IN ('pending', 'created', 'unknown')").bind(w1, w2).first('n');
+    expect(n).toBe(1);
+    const st = (await E.DB.prepare('SELECT id, state, stop_reason FROM watches WHERE id IN (?, ?)').bind(w1, w2).all()).results;
+    expect(st.every((x: any) => x.state === 'done')).toBe(true);
+    expect(st.find((x: any) => x.id === w1).stop_reason).toMatch(/Started 1 of 1/);
+    expect(st.find((x: any) => x.id === w2).stop_reason).toMatch(/group "competition"/);
   });
   it('never shows one person another person\'s rows', async () => {
     const inv = await api('POST', '/admin/users', {email: 'member@example.com'});

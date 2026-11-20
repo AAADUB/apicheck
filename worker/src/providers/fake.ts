@@ -2,6 +2,10 @@
 // Capacity comes and goes on a fixed rhythm, so the whole flow (seen, gone, launched) can be watched in a browser.
 // It exists only where DEV_TOOLS=1.
 import {ProviderError} from '../types';
+import {Unclear} from './net';
+
+/* the machines this pretend provider has made, by name, so an unclear launch can be looked up like at a real provider */
+export const MADE = new Map<string, string>();
 import type {Provider, Catalog, Offer} from '../types';
 
 const CONFIGS = [
@@ -26,9 +30,16 @@ export const fake: Provider = {
   },
   async offers(c) { return offersAt(c.now); },
   async launch(c, p) {
-    if (p.spec.launch && p.spec.launch.fail === 'quota') throw new ProviderError('quota', 'Test: the account may not start this.');
+    const fail = p.spec.launch && p.spec.launch.fail;
+    if (fail === 'quota') throw new ProviderError('quota', 'Test: the account may not start this.');
+    if (fail === 'timeout_made') { MADE.set(p.name, 'test-' + p.name); throw new Unclear('Test: no answer (timed out), but the machine was made.'); }
+    if (fail === 'timeout') throw new Unclear('Test: no answer (timed out), and nothing was made.');
+    if (fail === '5xx') throw new ProviderError('http', 'Test: internal server error.', 503);
     if (Math.floor(c.now / 1000) % 60 >= 40 && p.config === 'fake_8x_h100') throw new ProviderError('capacity', 'Test: taken a moment ago.');
-    return {extId: 'test-' + Math.random().toString(36).slice(2, 10), name: p.name, detail: {region: p.region, ip: '192.0.2.10'}};
+    const id = 'test-' + Math.random().toString(36).slice(2, 10);
+    MADE.set(p.name, id);
+    return {extId: id, name: p.name, detail: {region: p.region, ip: '192.0.2.10'}};
   },
+  async find(c, p) { const id = MADE.get(p.name); return id ? {extId: id, status: 'active'} : null; },
   async instance() { return {status: 'active', ip: '192.0.2.10'}; }
 };

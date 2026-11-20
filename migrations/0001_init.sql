@@ -38,7 +38,7 @@ CREATE INDEX sessions_expiry ON sessions(expires_at);
 CREATE TABLE keys (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  provider TEXT NOT NULL,              -- lambda | upcloud | nebius | runpod
+  provider TEXT NOT NULL,              -- lambda | upcloud | nebius | runpod | hyperstack
   label TEXT NOT NULL,
   comment TEXT NOT NULL DEFAULT '',
   key_enc BLOB NOT NULL,

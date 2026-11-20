@@ -36,5 +36,10 @@ Practices adopted: separate "seen" from "launched"; write the launch before call
 
 ## Changelog
 
+- 20.11.2026 — v1.2: Hyperstack added (flavors with stock_available plus /core/stocks; launch with the region's environment, key and image; ERROR right after acceptance = deleted and treated as capacity).
+  Launch safety rebuilt: atomic claim in D1 before every launch (watch limit and shared group limit, pending/created/unknown all count); unique machine name per attempt;
+  an unclear answer (timeout, network, 5xx) is settled by looking the machine up by name (Lambda, UpCloud, Nebius, RunPod, Hyperstack) and never by asking again;
+  launches interrupted by a restart are settled on the next check; an unsettled launch stays "unknown", counts, and blocks resume until deleted. Nebius uses the launch id as its idempotency key.
+  Shared group across watches, keys and providers. Fix: only the invalid field turns red, not the whole launch form.
 - 20.11.2026 — v1.1: search engines: noindex, nofollow, noarchive on every page, file and API answer (header and meta); robots.txt no longer blocks crawling, so the noindex is seen (Google: a page blocked in robots.txt can still be listed).
 - 20.11.2026 — v1: four providers, watches with notify or launch, availability board, machines, activity, keys, users, settings; deployed.

@@ -95,6 +95,18 @@ export const runpod: Provider = {
     if (!r || !r.id) throw new ProviderError('http', 'RunPod accepted the request but returned no pod id.');
     return {extId: r.id, name: r.name || p.name, price: typeof r.cost === 'number' ? round2(r.cost) : undefined, currency: 'USD', detail: {status: r.status, dataCenter: r.dataCenterId || p.region, cloud}};
   },
+  async find(c, p) {
+    let cursor = '';
+    for (let i = 0; i < 5; i++) {
+      const r = await get(c, '/pods?limit=200' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+      const list: any[] = Array.isArray(r) ? r : (r && (r.pods || r.data || r.items)) || [];
+      const x = list.find(q => q && q.name === p.name);
+      if (x) return {extId: x.id, status: x.status || x.desiredStatus};
+      if (!r || !r.pagination || !r.pagination.hasNextPage || !r.pagination.nextCursor) break;
+      cursor = r.pagination.nextCursor;
+    }
+    return null;
+  },
   async instance(c, extId) {
     const p = await get(c, '/pods/' + encodeURIComponent(extId));
     if (!p) return null;

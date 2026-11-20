@@ -6,7 +6,7 @@ export const UA = 'APICheck/1.0 (+https://github.com/AAADUB/apicheck)';
 export type Classify = (status: number, body: any, text: string) => FailKind | null;
 
 /** a request whose answer is unclear (network failure or timeout) is marked, so a launch is never repeated blindly */
-export class Unclear extends ProviderError { constructor(message: string) { super('http', message); this.name = 'Unclear'; } }
+export class Unclear extends ProviderError { constructor(message: string, public extId = '') { super('http', message); this.name = 'Unclear'; } }
 
 export async function call(c: Ctx, url: string, init: RequestInit & {timeout?: number; memo?: boolean} = {}, classify?: Classify): Promise<any> {
   const key = init.memo ? (init.method || 'GET') + ' ' + url : '';
@@ -26,6 +26,11 @@ export async function call(c: Ctx, url: string, init: RequestInit & {timeout?: n
   })();
   if (key && memo) { memo.set(key, run); run.catch(() => memo.delete(key)); }
   return run;
+}
+/** reads a launch does before it asks for the machine: a failure there is never unclear, because nothing was asked for yet */
+export async function prep<T>(p: Promise<T>): Promise<T> {
+  try { return await p; }
+  catch (e) { const pe = e instanceof ProviderError ? e : new ProviderError('http', (e as Error).message); throw new ProviderError(pe.kind, 'Before the launch: ' + pe.message, 1, pe.retryAfter); }
 }
 export function defaultKind(status: number): FailKind {
   if (status === 401 || status === 403) return 'auth';

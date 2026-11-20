@@ -72,7 +72,10 @@ export interface Provider {
   catalog(c: Ctx): Promise<Catalog>;
   /** availability only, as fast as the provider allows; null = no signal (UpCloud) */
   offers(c: Ctx, watch: {spec: Record<string, any>}): Promise<Offer[] | null>;
+  /** start a machine named plan.name. The name is unique to this attempt (it ends in part of the launch id), so find() can tell later whether it exists. */
   launch(c: Ctx, plan: LaunchPlan): Promise<Launched>;
+  /** look for a machine by the exact name a launch gave it: how an unclear or interrupted launch is settled without starting a second machine */
+  find?(c: Ctx, plan: LaunchPlan): Promise<{extId: string; status?: string} | null>;
   /** read a machine back after launch: status and address */
   instance?(c: Ctx, extId: string, region: string): Promise<Record<string, unknown> | null>;
 }

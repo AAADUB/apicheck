@@ -86,6 +86,11 @@ export const lambda: Provider = {
     if (!id) throw new ProviderError('http', 'Lambda accepted the request but returned no instance id.');
     return {extId: id, name: p.name, detail: {region: p.region}};
   },
+  async find(c, p) {
+    const list = await get(c, '/instances');
+    const i = (Array.isArray(list) ? list : []).find((x: any) => x && x.name === p.name);
+    return i ? {extId: i.id, status: i.status} : null;
+  },
   async instance(c, extId) {
     const i = await get(c, '/instances/' + encodeURIComponent(extId));
     return i ? {status: i.status, ip: i.ip || null, privateIp: i.private_ip || null, hostname: i.hostname || null, jupyter: i.jupyter_url || null, region: i.region && i.region.name} : null;

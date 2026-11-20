@@ -7,6 +7,7 @@ export const LIMITS = {
   upcloud: {min: 15, def: 20, launchGap: 20000},
   nebius: {min: 10, def: 20, launchGap: 5000},
   runpod: {min: 5, def: 10, launchGap: 3000},
+  hyperstack: {min: 5, def: 10, launchGap: 5000},
   fake: {min: 2, def: 5, launchGap: 0}
 };
 export const EVERY_MAX = 3600;
@@ -95,12 +96,30 @@ export const PROVIDERS = {
       {id: 'name', label: 'Pod name', type: 'text', max: 60, ph: 'apicheck-…'}
     ],
     notes: ['RunPod needs at least one hour of the pod\'s price in credit to start it, and has a spend limit per hour across everything running ($80 by default).', 'Stopping a pod releases its GPUs; a stopped 8-GPU pod may not get them back. Terminate and keep data on a network volume instead.', 'RunPod also has its own "deploy when available" queue (retries about every five minutes). API Check checks more often and does not use it, so two machines are never started by two mechanisms.']
+  },
+  hyperstack: {
+    name: 'Hyperstack', short: 'H', site: 'https://console.hyperstack.cloud',
+    keyHelp: 'An API key from the Hyperstack console: API Keys. A Hyperstack key can do anything your account can. To start machines you also need, in each region you want, an environment with your SSH key in it (Environments, then SSH keys).',
+    keyFields: [{id: 'key', label: 'API key', type: 'secret', ph: 'API key'}],
+    signal: 'exact',
+    signalText: 'Hyperstack marks every flavor in every region as in stock or not, and reports how many machines of each GPU count can be deployed now. API Check reads both on every check.',
+    regionsLabel: 'Regions',
+    launch: [
+      {id: 'environment', label: 'Environment', type: 'select', from: 'environments', empty: 'The first of mine in the region with an SSH key', regionBound: true, help: 'An environment lives in one region, so choosing one limits the watch to that region.'},
+      {id: 'keypair', label: 'SSH key', type: 'select', from: 'keypairs', empty: 'The first key in that environment', help: 'Hyperstack keeps SSH keys per environment.'},
+      {id: 'image', label: 'Image', type: 'select', from: 'images', empty: 'Newest Ubuntu with CUDA (and Docker, if there is one)', regionBound: true, help: 'Images belong to a region.'},
+      {id: 'public_ip', label: 'Public IP address', type: 'toggle', def: true},
+      {id: 'open_ssh', label: 'Open port 22 (SSH) to the internet', type: 'toggle', def: true, help: 'Hyperstack blocks all incoming traffic until a rule allows it.'},
+      {id: 'name', label: 'Machine name', type: 'text', max: 40, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$', ph: 'apicheck-…'},
+      {id: 'user_data', label: 'Startup script (cloud-init)', type: 'textarea', max: 60000, code: true}
+    ],
+    notes: ['The 8x H100 SXM5 flavor is sold in CANADA-1 and US-1, with different memory and local disk in each. H200 and B200 8x machines are in CANADA-1.', 'Hyperstack does not document an error code for "no capacity". A refused launch that is not about the request, the balance or a limit is treated as capacity, and the hunt goes on.', 'A machine that goes into ERROR right after it is accepted is deleted at once, and the hunt goes on.']
   }
 };
 export const DEV_PROVIDER = {
   fake: {name: 'Test provider', short: 'T', site: '', keyHelp: 'Any key that starts with "test". Nothing is real and nothing costs money.', keyFields: [{id: 'key', label: 'Key', type: 'secret', ph: 'test-…'}], signal: 'level',
     signalText: 'Capacity comes and goes every minute: east for 20 seconds, west for 10.', regionsLabel: 'Regions',
-    launch: [{id: 'ssh_key', label: 'SSH key', type: 'select', from: 'sshKeys', required: true}, {id: 'name', label: 'Machine name', type: 'text', max: 60}, {id: 'fail', label: 'Make the launch fail', type: 'select', choices: [['', 'No'], ['quota', 'With an account limit']]}], notes: []}
+    launch: [{id: 'ssh_key', label: 'SSH key', type: 'select', from: 'sshKeys', required: true}, {id: 'name', label: 'Machine name', type: 'text', max: 60}, {id: 'fail', label: 'Make the launch fail', type: 'select', choices: [['', 'No'], ['quota', 'With an account limit'], ['timeout_made', 'Time out, machine made'], ['timeout', 'Time out, nothing made'], ['5xx', 'Server error, nothing made']]}], notes: []}
 };
 /* settings that change what the provider is asked about, chosen before the configuration list loads */
 export const PARAMS = {

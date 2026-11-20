@@ -31,7 +31,7 @@ const API_ERR = {
   regions: 'Choose at least one region.', mode: 'Choose what happens when capacity is found.', notify_unsupported: 'This provider can only be watched by trying to launch.', params: 'Check the settings above the list.',
   launch_field: 'Check the launch settings.', every: 'Choose a check interval within the provider’s limits.', max_launch: 'Start from 1 to 10 machines.', renotify: 'Choose a quiet time from 1 minute to 24 hours.',
   max_price: 'The price cap must be above zero.', dates: 'Check the start and end: the end must be in the future and after the start.', name: 'Give the watch a name.', key_broken: 'The key of this watch was refused by the provider. Replace it on the Keys page first.',
-  watch_limit: 'You already have 60 watches. Delete one to add another.', state: 'That is not a state a watch can have.', launch_done: 'This watch has started all the machines it was allowed to. Raise the number in its settings first.',
+  watch_limit: 'You already have 60 watches. Delete one to add another.', state: 'That is not a state a watch can have.', launch_done: 'This watch has started all the machines it was allowed to. Raise the number in its settings first.', launch_unknown: 'A launch of this watch was never confirmed. Check the provider console; if no machine was started, delete that launch on the Machines page, then resume.', group: 'A group name uses letters, digits, spaces, dots, dashes and underscores.',
   not_running: 'The watch is paused or finished. Resume it first.', no_machine: 'This launch has no machine to read.', mail_off: 'Email is not set up on this server yet.', send_failed: 'The message could not be sent.'
 };
 const apiMsg = e => (API_ERR[e && e.code] || API_ERR.server) + (e && e.detail ? ' ' + e.detail : '');
@@ -174,7 +174,7 @@ function vWatch() {
     <div><h3>What it looks for</h3><dl class="kv"><dt>Configurations</dt><dd>${w.spec.configs.map((c, i) => `${w.spec.configs.length > 1 ? (i + 1) + '. ' : ''}${esc(cfgName(w, c))}${w.spec.prices && w.spec.prices[c] ? ` <span class="mute">${esc(perHour(w.spec.prices[c], w.spec.currency))}</span>` : ''}`).join('<br>')}</dd>
       <dt>${esc(P.regionsLabel)}</dt><dd>${esc(whereLine(w))}</dd>${paramsLine(w)}
       ${P.signal === 'level' || P.signal === 'count' ? `<dt>Counts as free</dt><dd>${esc(levelWord(w.spec.minLevel))}</dd>` : ''}
-      <dt>When found</dt><dd>${w.mode === 'launch' ? `Start ${s(w.maxLaunch, 'machine')} (${w.launched} started)` : 'Email you'}${w.maxPrice ? `, only up to ${esc(perHour(w.maxPrice, w.spec.currency))}` : ''}</dd>
+      <dt>When found</dt><dd>${w.mode === 'launch' ? `Start ${s(w.maxLaunch, 'machine')} (${w.launched} started)${w.spec.group ? `, shared with the group “${esc(w.spec.group)}”` : ''}` : 'Email you'}${w.maxPrice ? `, only up to ${esc(perHour(w.maxPrice, w.spec.currency))}` : ''}</dd>
       <dt>Interval</dt><dd>every ${esc(dur(w.every))}${w.mode === 'notify' ? `, quiet time ${esc(dur(w.renotify * 60))}` : ''}</dd>
       ${w.startsAt || w.endsAt ? `<dt>Active</dt><dd>${w.startsAt ? 'from ' + esc(when(w.startsAt)) : 'from creation'}${w.endsAt ? ' until ' + esc(when(w.endsAt)) : ''}</dd>` : ''}
       <dt>Key</dt><dd>${pdot(w.provider)} ${esc(P.name)} · <a href="#keys">${esc(w.keyLabel)}</a></dd></dl></div></section>
@@ -222,7 +222,7 @@ function newEd(base) {
     names: base ? {...(base.spec.names || {})} : {}, prices: base ? {...(base.spec.prices || {})} : {}, currency: base ? base.spec.currency : 'USD',
     mode: base ? base.mode : 'notify', launch: base ? {...(base.spec.launch || {})} : {}, every: base ? base.every : null, minLevel: base ? base.spec.minLevel || 'low' : 'low',
     renotify: base ? base.renotify : 30, maxLaunch: base ? base.maxLaunch : 1, maxPrice: base && base.maxPrice != null ? base.maxPrice : '', startsAt: base ? base.startsAt : null, endsAt: base ? base.endsAt : null,
-    startNow: base ? base.state === 'on' : true, name: base ? base.name : '', named: !!base, q: '', gpu: 'all', onlyFree: false, bound: base ? base.spec.boundRegion || null : null};
+    startNow: base ? base.state === 'on' : true, name: base ? base.name : '', named: !!base, group: base ? base.spec.group || '' : '', q: '', gpu: 'all', onlyFree: false, bound: base ? base.spec.boundRegion || null : null};
   if (k && e.every == null) e.every = (LIMITS[k.provider] || {def: 30}).def;
   if (k) for (const p of PARAMS[k.provider] || []) if (e.params[p.id] == null) e.params[p.id] = p.def;
   if (q.get('params')) try { Object.assign(e.params, JSON.parse(q.get('params'))); } catch { /* ignore */ }
@@ -305,6 +305,7 @@ function foundStep() {
   const fields = P.launch.map(f => fieldHtml(f, opts)).join('');
   return `${mode}<div class="two-f"><label class="fld"><span>How many machines</span><span class="unit"><input type="number" min="1" max="10" step="1" id="edMax" data-ed="maxLaunch" value="${esc(e.maxLaunch)}"> at most</span><small>The watch finishes after this many. Each one bills by the hour.</small></label>
     <label class="fld"><span>Price cap <i>optional</i></span><span class="unit"><input type="number" min="0" step="0.01" id="edPrice" data-ed="maxPrice" value="${esc(e.maxPrice)}" placeholder="none"> ${esc(e.currency || 'USD')}/h</span><small>Skip configurations above this hourly price.</small></label></div>
+    <label class="fld"><span>Shared group <i>optional</i></span><input type="text" id="edGroup" data-ed="group" maxlength="40" value="${esc(e.group || '')}" placeholder="for example: competition" autocomplete="off"><small>Hunting for the same machine with several watches, keys or providers? Give them one group name. The group starts no more machines in total than the number above; once it has them, its other launch watches stop.</small></label>
     <fieldset class="fld" style="border:0;padding:0;margin:0;display:grid;gap:14px"><legend class="vh">Launch settings</legend>${fields}</fieldset>
     ${P.notes && P.notes.length ? `<div class="note warn">${P.notes.map(n => esc(n)).join('<br>')}</div>` : ''}`;
 }
@@ -326,7 +327,7 @@ function oftenStep() {
   const presets = [lim.min, 10, 15, 30, 60, 300].filter((x, i, a) => x >= lim.min && a.indexOf(x) === i);
   const local = ms => { if (!ms) return ''; const d = new Date(ms - new Date(ms).getTimezoneOffset() * 60e3); return d.toISOString().slice(0, 16); };
   return `<div class="fld"><span>Check every</span><div class="ctl">${seg('edEvery', e.every, presets.map(x => [x, shortDur(x)]), 'Interval')}<span class="unit"><input type="number" id="edEvery" data-ed="every" min="${lim.min}" max="${EVERY_MAX}" value="${esc(e.every)}" aria-label="Seconds between checks"> seconds</span></div>
-      <small>${esc(P.name)} allows ${lim.min} seconds at the least${e.provider === 'lambda' ? ' (about one request a second, one launch every 12 seconds)' : e.provider === 'runpod' ? ' (a daily request budget shared by every call)' : e.provider === 'upcloud' ? ' (no published limit; kept polite)' : ''}. All watches on one key share one check, so more watches do not mean more requests.</small></div>
+      <small>${esc(P.name)} allows ${lim.min} seconds at the least${e.provider === 'lambda' ? ' (about one request a second, one launch every 12 seconds)' : e.provider === 'runpod' ? ' (a daily request budget shared by every call)' : e.provider === 'upcloud' ? ' (no published limit; kept polite)' : e.provider === 'hyperstack' ? ' (500 requests a minute per address, shared by everything on Cloudflare’s address)' : ''}. All watches on one key share one check, so more watches do not mean more requests.</small></div>
     ${P.signal === 'level' || P.signal === 'count' ? `<div class="fld"><span>Counts as free</span>${seg('edLevel', e.minLevel, [['low', 'Any level'], ['medium', 'Medium or high'], ['high', 'High only']], 'Minimum level')}<small>A low level means a launch may still fail. ${e.mode === 'launch' ? 'For launching, any level is usually right: trying costs nothing.' : ''}</small></div>` : ''}
     ${e.mode === 'notify' ? `<label class="fld"><span>Quiet time between emails</span><span class="unit"><input type="number" id="edRe" data-ed="renotify" min="1" max="1440" value="${esc(e.renotify)}"> minutes</span><small>You get one email when it appears. After it is gone, a new appearance is emailed only after this much time since the last email.</small></label>` : ''}
     <div class="two-f"><label class="fld"><span>Start <i>optional</i></span><input type="datetime-local" id="edStart" data-chg="edDate" data-f="startsAt" value="${esc(local(e.startsAt))}"></label>
@@ -358,11 +359,11 @@ async function saveEd() {
   if (!e.configs.length) return say(API_ERR.configs);
   const body = {keyId: e.keyId, name: (e.name || '').trim() || autoName(), mode: e.mode, every: Number(e.every), maxLaunch: Number(e.maxLaunch) || 1, renotify: Number(e.renotify) || 30,
     maxPrice: e.maxPrice === '' || e.maxPrice == null ? null : Number(e.maxPrice), startsAt: e.startsAt, endsAt: e.endsAt, paused: !e.startNow,
-    spec: {configs: e.configs, regions: e.bound ? [e.bound] : e.regions, minLevel: e.minLevel, params: e.params, launch: e.launch, names: e.names, prices: e.prices, currency: e.currency, boundRegion: e.bound || undefined}};
+    spec: {configs: e.configs, regions: e.bound ? [e.bound] : e.regions, minLevel: e.minLevel, params: e.params, launch: e.launch, names: e.names, prices: e.prices, currency: e.currency, boundRegion: e.bound || undefined, group: e.mode === 'launch' ? (e.group || '').trim() || undefined : undefined}};
   if (b.dataset.busy) return; b.dataset.busy = '1'; b.setAttribute('aria-busy', 'true');
   try {
     let id = e.id;
-    if (id) { await api.patchWatch(id, body); await api.patchWatch(id, {state: e.startNow ? 'on' : 'paused'}).catch(x => { if (x.code !== 'launch_done') throw x; }); }
+    if (id) { await api.patchWatch(id, body); await api.patchWatch(id, {state: e.startNow ? 'on' : 'paused'}).catch(x => { if (x.code !== 'launch_done' && x.code !== 'launch_unknown') throw x; }); }
     else id = (await api.addWatch(body)).id;
     S.ed = null; toast(e.id ? 'Saved.' : e.startNow ? 'Watching. You will be emailed when it is free.' : 'Saved, paused.'); go('watch/' + id);
   } catch (x) {

@@ -282,7 +282,7 @@ code.key { color: var(--ink-2); }
 .fld > span { font-weight: 500; }
 .fld > span i { font-style: normal; font-weight: 400; color: var(--ink-3); margin-left: 6px; font-size: 13px; }
 .fld small { color: var(--ink-3); font-size: 12.5px; line-height: 1.4; text-wrap: pretty; }
-.fld:has([aria-invalid=true]) input, .fld:has([aria-invalid=true]) select, .fld:has([aria-invalid=true]) textarea { border-color: var(--crit); }
+.fld:not(fieldset):has([aria-invalid=true]) input, .fld:not(fieldset):has([aria-invalid=true]) select, .fld:not(fieldset):has([aria-invalid=true]) textarea { border-color: var(--crit); }
 .unit { display: flex; align-items: center; gap: 10px; color: var(--ink-2); font-weight: 400; }
 .unit input { width: 110px; }
 .chk { display: flex; align-items: flex-start; gap: 10px; font-size: 14px; cursor: pointer; }
@@ -370,7 +370,7 @@ form .d-f { position: sticky; bottom: 0; margin: 6px -24px -24px; padding: 14px 
 .provs label:has(input:checked) { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
 .provs input { accent-color: var(--ink); margin: 0; }
 .pv-dot { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; font: 700 11px/1 var(--display); color: #fff; flex: none; }
-.pv-lambda { background: #5b3fd6; } .pv-upcloud { background: #2f55c9; } .pv-nebius { background: #1b1f24; box-shadow: inset 0 0 0 1px var(--rule-2); } .pv-runpod { background: #8a35c9; } .pv-fake { background: #5d6775; }
+.pv-lambda { background: #5b3fd6; } .pv-upcloud { background: #2f55c9; } .pv-nebius { background: #1b1f24; box-shadow: inset 0 0 0 1px var(--rule-2); } .pv-runpod { background: #8a35c9; } .pv-hyperstack { background: #0d7480; } .pv-fake { background: #5d6775; }
 .provs .pv-dot, .w-line .pv-dot, .meta .pv-dot, td .pv-dot, .kv .pv-dot, .lead .pv-dot, .choice .pv-dot { display: inline-grid; vertical-align: -5px; margin-right: 2px; }
 .w-line .pv-dot, .meta .pv-dot { width: 18px; height: 18px; font-size: 10px; border-radius: 5px; }
 #toast { position: fixed; left: 50%; bottom: 28px; z-index: 60; max-width: min(520px, calc(100vw - 32px)); padding: 11px 16px; border-radius: 10px; background: var(--ink); color: var(--surface); font-size: 14px; font-weight: 500; box-shadow: 0 16px 40px -12px var(--shade); opacity: 0; transform: translate(-50%, 12px); pointer-events: none; transition: opacity .2s, transform .35s var(--ease); overflow-wrap: anywhere; }

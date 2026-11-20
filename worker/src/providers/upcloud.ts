@@ -108,6 +108,11 @@ export const upcloud: Provider = {
     if (!sv || !sv.uuid) throw new ProviderError('http', 'UpCloud accepted the request but returned no server id.');
     return {extId: sv.uuid, name: sv.title || p.name, detail: {state: sv.state, zone: p.region}};
   },
+  async find(c, p) {
+    const r = await get(c, '/server'), list = (r && r.servers && r.servers.server) || [];
+    const sv = list.find((x: any) => x && x.title === p.name);
+    return sv ? {extId: sv.uuid, status: sv.state} : null;
+  },
   async instance(c, extId) {
     const r = await get(c, '/server/' + encodeURIComponent(extId)), sv = r && r.server;
     if (!sv) return null;
