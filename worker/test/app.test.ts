@@ -1,3 +1,5 @@
+// Types are loose here on purpose: these tests drive the Worker through its HTTP API and the Durable Object instance.
+// @ts-nocheck
 import {env, SELF, runInDurableObject} from 'cloudflare:test';
 import {describe, it, expect, beforeAll} from 'vitest';
 import {sealKey, openKey} from '../src/crypto';
