@@ -486,12 +486,24 @@ function dKeyAdd(prov) {
   const list = Object.entries(PROV()), p = prov || store.get('lastProv', list[0][0]), P = pv(p);
   openDlg(`${dHead('Add a key')}<form class="form" data-form="keyAdd" novalidate>
     <div class="provs" role="radiogroup" aria-label="Provider">${list.map(([id, x]) => `<label><input type="radio" name="kpv" value="${esc(id)}" data-chg="kProv"${id === p ? ' checked' : ''}>${pdot(id)}${esc(x.name)}</label>`).join('')}</div>
-    <p class="hint" id="kHelp">${esc(P.keyHelp)}</p>
-    ${P.keyFields.map(f => f.type === 'textarea' ? `<label class="fld"><span>${esc(f.label)}</span><textarea id="kKey" class="code" rows="6" spellcheck="false" autocomplete="off" placeholder="${esc(f.ph || '')}" required></textarea></label>` : `<label class="fld"><span>${esc(f.label)}</span><input type="text" id="kKey" class="secret" autocomplete="off" spellcheck="false" placeholder="${esc(f.ph || '')}" required autofocus data-1p-ignore data-lpignore="true"></label>`).join('')}
+    ${p === 'nebius' ? nebiusKeyForm() : `<p class="hint" id="kHelp">${esc(P.keyHelp)}</p>`}
+    ${p === 'nebius' ? '' : P.keyFields.map(f => f.type === 'textarea' ? `<label class="fld"><span>${esc(f.label)}</span><textarea id="kKey" class="code" rows="6" spellcheck="false" autocomplete="off" placeholder="${esc(f.ph || '')}" required></textarea></label>` : `<label class="fld"><span>${esc(f.label)}</span><input type="text" id="kKey" class="secret" autocomplete="off" spellcheck="false" placeholder="${esc(f.ph || '')}" required autofocus data-1p-ignore data-lpignore="true"></label>`).join('')}
     <label class="fld"><span>Name <i>optional</i></span><input type="text" id="kLabel" maxlength="60" placeholder="${esc(P.name)}"></label>
     <label class="fld"><span>Note <i>optional</i></span><input type="text" id="kNote" maxlength="500" placeholder="Whose account, what it is for"></label>
     <p class="hint">The key is sent once, checked with ${esc(P.name)}, and stored encrypted. It is never shown again.</p><p class="err" role="alert" hidden></p>
     <div class="d-f"><button type="button" class="btn ghost" data-act="close">Cancel</button><button type="submit" class="btn">Check and add</button></div></form>`);
+}
+/* Nebius without a terminal: the browser makes the key pair, the public half is downloaded for the Nebius console, the private half stays in the form */
+function nebiusKeyForm() {
+  return `<ol class="kgen">
+      <li>In the <a href="https://console.nebius.com" target="_blank" rel="noopener noreferrer">Nebius console</a>: Administration → IAM → Create resource → Service account. Then, on the Service accounts tab, open its row menu → Add to group → <b>editors</b>.</li>
+      <li><button type="button" class="btn ghost sm" data-act="kGen">${ico('keys', 15)}Create a key pair</button> <span id="kGenOut" class="hint" aria-live="polite">The file nebius-public.pem is downloaded; the private key stays in this form.</span></li>
+      <li>In the console, on the service account's page: Upload authorized key → Attach file → nebius-public.pem → Upload key. Leave the expiry empty.</li>
+      <li>Copy the two IDs here: the service account's (on its page) and the key's (Authorized keys tab).</li>
+    </ol>
+    <label class="fld"><span>Service account ID</span><input type="text" id="kSa" autocomplete="off" spellcheck="false" placeholder="serviceaccount-…" data-1p-ignore data-lpignore="true"></label>
+    <label class="fld"><span>Authorized key ID</span><input type="text" id="kKid" autocomplete="off" spellcheck="false" placeholder="publickey-…" data-1p-ignore data-lpignore="true"></label>
+    <details class="kpriv"><summary>Private key, or a credentials file from the Nebius CLI</summary><textarea id="kKey" class="code" rows="5" spellcheck="false" autocomplete="off" placeholder="Filled in by “Create a key pair”, or paste your own"></textarea></details>`;
 }
 function dKeyEdit(k) {
   openDlg(`${dHead(k.label)}<form class="form" data-form="keyEdit" data-id="${esc(k.id)}" novalidate>
@@ -558,8 +570,16 @@ const FORMS = {
   },
   keyAdd(f) {
     const prov = ($('input[name=kpv]:checked', f) || {}).value, k = $('#kKey', f);
-    if (!k.value.trim()) return fail(f, 'Paste the key.', k);
-    return busy(f, async () => { const r = await api.addKey({provider: prov, key: k.value.trim(), label: $('#kLabel', f).value, comment: $('#kNote', f).value}); store.set('lastProv', prov); closeDlg(); toast(`Key checked with ${pv(prov).name} and added${r.account ? ' (' + r.account + ')' : ''}.`); S.me = await api.me(); if (S.route === 'new' && S.ed) { S.ed = null; } await render(); });
+    let key = k.value.trim();
+    if (prov === 'nebius' && !key.startsWith('{')) {
+      const sa = $('#kSa', f).value.trim(), kid = $('#kKid', f).value.trim();
+      if (!/^serviceaccount-[a-z0-9]+$/i.test(sa)) return fail(f, 'Copy the service account ID: it starts with serviceaccount-.', $('#kSa', f));
+      if (!/^publickey-[a-z0-9]+$/i.test(kid)) return fail(f, 'Copy the authorized key ID: it starts with publickey-.', $('#kKid', f));
+      if (!/PRIVATE KEY-----/.test(key)) { $('.kpriv', f).open = true; return fail(f, 'Press “Create a key pair” first, or paste your private key.', k); }
+      key = sa + '\n' + kid + '\n' + key;
+    }
+    if (!key) return fail(f, 'Paste the key.', k);
+    return busy(f, async () => { const r = await api.addKey({provider: prov, key, label: $('#kLabel', f).value, comment: $('#kNote', f).value}); store.set('lastProv', prov); closeDlg(); toast(`Key checked with ${pv(prov).name} and added${r.account ? ' (' + r.account + ')' : ''}.`); S.me = await api.me(); if (S.route === 'new' && S.ed) { S.ed = null; } await render(); });
   },
   keyEdit(f) {
     const k = $('#kKey', f), b = {label: $('#kLabel', f).value, comment: $('#kNote', f).value}; if (k.value.trim()) b.key = k.value.trim();
@@ -635,6 +655,21 @@ const ACT = {
     act(async () => { await api.endLaunch(el.dataset.id); closeDlg(); await render(); }, 'Marked as ended.');
   },
   mRefresh(el) { act(async () => { const r = await api.refreshLaunch(el.dataset.id).catch(x => { if (x.code === 'no_key_for_machine') { ACT.mEnd(el); return null; } throw x; }); if (!r) return; toast(`Status: ${String((r.detail && r.detail.status) || 'not found').toLowerCase()}${r.detail && r.detail.ip ? ', address ' + r.detail.ip : ''}.`); await render(); }); },
+  async kGen(el) {
+    if (el.dataset.busy) return; el.dataset.busy = '1'; el.setAttribute('aria-busy', 'true');
+    const out = $('#kGenOut');
+    try {
+      const pair = await crypto.subtle.generateKey({name: 'RSASSA-PKCS1-v1_5', modulusLength: 4096, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256'}, true, ['sign', 'verify']);
+      const pem = (label, buf) => { const b = btoa(String.fromCharCode(...new Uint8Array(buf))); return `-----BEGIN ${label}-----\n${b.match(/.{1,64}/g).join('\n')}\n-----END ${label}-----\n`; };
+      const pub = pem('PUBLIC KEY', await crypto.subtle.exportKey('spki', pair.publicKey));
+      $('#kKey').value = pem('PRIVATE KEY', await crypto.subtle.exportKey('pkcs8', pair.privateKey));
+      const href = 'data:application/x-pem-file;base64,' + btoa(pub), a = document.createElement('a');
+      a.href = href; a.download = 'nebius-public.pem'; document.body.appendChild(a); a.click(); a.remove();
+      out.innerHTML = `Done: nebius-public.pem is in your Downloads (<a href="${href}" download="nebius-public.pem">download again</a>). The private key is in this form; do not close it until the key is added.`;
+      el.textContent = 'Key pair created';
+    } catch (x) { out.textContent = 'This browser could not create the key pair: ' + x.message; }
+    finally { delete el.dataset.busy; el.removeAttribute('aria-busy'); }
+  },
   mForget(el) {
     if (!el.dataset.sure) return dConfirm('Nothing was started?', 'Only confirm after checking the provider console: there is no machine with this name. The launch stops counting, and the watch can be resumed and may start a machine.', 'mForget', el.dataset.id, 'Yes, nothing was started');
     act(async () => { await api.forgetLaunch(el.dataset.id); closeDlg(); await render(); }, 'Done. The watch can be resumed.');

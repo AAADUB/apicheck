@@ -503,3 +503,10 @@ form .d-f { position: sticky; bottom: 0; margin: 6px -24px -24px; padding: 14px 
 .prelist li.pl-warn::before { background: var(--warn); }
 .prelist li.pl-fail::before { background: var(--crit); border-radius: 2px; }
 .prelist li.pl-fail { font-weight: 550; }
+
+/* Nebius key, made in the browser */
+.kgen { list-style: decimal; margin: 0 0 4px; padding-left: 1.3em; display: grid; gap: 10px; line-height: 1.5; max-width: 62ch; }
+.kgen .btn { margin-right: 6px; }
+.kpriv summary { cursor: pointer; color: var(--ink-2); font-size: .92em; padding: 4px 0; }
+.kpriv textarea { margin-top: 8px; width: 100%; }
+.kgen li::marker { font-weight: 600; color: var(--ink-2); }
