@@ -8,6 +8,9 @@ export const LIMITS = {
   nebius: {min: 5, def: 5, launchGap: 5000},      // no published limit; a 429 backs off
   runpod: {min: 2, def: 2, launchGap: 0},         // per-user minute/hour/day quotas; the engine paces itself from the RateLimit header
   hyperstack: {min: 5, def: 10, launchGap: 5000},
+  digitalocean: {min: 2, def: 5, launchGap: 5000},  // 5000 requests an hour and 250 a minute per token; one check is one request
+  vultr: {min: 3, def: 5, launchGap: 5000},         // 30 requests a second per source address; one check is 2 requests plus one per region asked
+  gcore: {min: 5, def: 10, launchGap: 10000},       // no published limit; one check is one request per region and machine kind
   fake: {min: 2, def: 5, launchGap: 0}
 };
 export const EVERY_MAX = 3600;
@@ -18,9 +21,13 @@ export const EUROPE = {
   nebius: /^(eu|uk)-/,                   // eu-north1 (Finland), eu-west1/2 (France), eu-south1 (Madrid), uk-south1/2
   hyperstack: /^(NORWAY|SWEDEN|FINLAND|ICELAND|UK|GERMANY|NETHERLANDS|FRANCE|SPAIN|ITALY|POLAND)-/i,
   upcloud: /^(de|fi|nl|pl|es|se|uk|dk|no|fr|it|at|ch|ie|be|cz)-/,
+  digitalocean: /^(ams|fra|lon)\d/,       // Amsterdam, Frankfurt, London
+  vultr: /^(ams|fra|lhr|man|cdg|mad|waw|sto)$/,   // Amsterdam, Frankfurt, London, Manchester, Paris, Madrid, Warsaw, Stockholm
+  // Gcore names regions by number, so its test reads the region name the catalogue shows ("Luxembourg-2, LU (76)")
+  gcore: /Luxembourg|Frankfurt|Darmstadt|Amsterdam|Helsinki|Paris|Warsaw|Sines|Lisbon|Chester|Newport|London|Manchester|Madrid|Milan|Stockholm|Vienna|Prague|Belgrade|Dublin|Brussels|Zurich|Oslo|Copenhagen|, (LU|DE|NL|FI|FR|PL|PT|GB|UK|ES|IT|SE|NO|AT|CZ|RS|IE|BE|CH|DK)\b/i,
   fake: /^test-east/
 };
-export const inEurope = (provider, region) => !!(EUROPE[provider] && EUROPE[provider].test(region));
+export const inEurope = (provider, region, name = '') => !!(EUROPE[provider] && (EUROPE[provider].test(region) || (name && EUROPE[provider].test(name))));
 const RANK = {none: 0, low: 1, medium: 2, yes: 2, high: 3};
 export const levelRank = l => RANK[l] ?? 0;
 export const LEVEL_NAME = {high: 'High', medium: 'Medium', low: 'Low', yes: 'Available', none: 'None'};
@@ -124,6 +131,53 @@ export const PROVIDERS = {
       {id: 'user_data', label: 'Startup script (cloud-init)', type: 'textarea', max: 60000, code: true}
     ],
     notes: ['The 8x H100 SXM5 flavor is sold in CANADA-1 and US-1, with different memory and local disk in each. H200 and B200 8x machines are in CANADA-1.', 'Hyperstack does not document an error code for "no capacity". A refused launch that is not about the request, the balance or a limit is treated as capacity, and the hunt goes on.', 'A machine that goes into ERROR right after it is accepted is deleted at once, and the hunt goes on.']
+  },
+  digitalocean: {
+    name: 'DigitalOcean', short: 'D', site: 'https://cloud.digitalocean.com',
+    keyHelp: 'A personal access token: API, Tokens, Generate New Token. Full access works; with custom scopes it needs droplet create, read and delete, actions read, sizes read, regions read, image read, ssh_key read, tag create and account read (billing read too, to show the balance). Give it an end date.',
+    keyFields: [{id: 'key', label: 'Personal access token', type: 'secret', ph: 'dop_v1_…'}],
+    signal: 'exact',
+    signalText: 'DigitalOcean lists, for every Droplet size, the datacenters where it can be created. API Check reads that list on every check. DigitalOcean does not document how quickly a sold-out datacenter leaves the list, so a launch attempt has the final word.',
+    regionsLabel: 'Datacenters',
+    launch: [
+      {id: 'ssh_key', label: 'SSH key', type: 'select', from: 'sshKeys', empty: 'Every key on the team', help: 'Keys go into the root account.'},
+      {id: 'image', label: 'Image', type: 'text', max: 100, ph: 'gpu-h100x8-base', help: 'Empty: the AI/ML-ready NVIDIA image DigitalOcean recommends for the size (gpu-h100x8-base for 8 GPUs). Any image slug or id works.'},
+      {id: 'name', label: 'Droplet name', type: 'text', max: 50, pattern: '^[A-Za-z0-9][A-Za-z0-9.-]*$', ph: 'apicheck-…'},
+      {id: 'user_data', label: 'Startup script (cloud-init)', type: 'textarea', max: 60000, code: true, help: 'Plain text, up to 64 KiB.'}
+    ],
+    notes: ['DigitalOcean lists 8x H100 GPU Droplets (1920 GiB RAM) in AMS3 (Amsterdam), NYC2 and TOR1; in Europe that is Amsterdam only.', 'A Droplet bills by the second while it exists, powered off or not: destroy it to stop billing. Each account has a Droplet limit; ask support to raise it if a launch is refused for it.', 'A create that DigitalOcean accepts but then reports as errored is destroyed at once, and the hunt goes on.']
+  },
+  vultr: {
+    name: 'Vultr', short: 'V', site: 'https://my.vultr.com',
+    keyHelp: 'The API key: Account, API, Enable API. Under Access Control, allow any IPv4 and any IPv6 address: API Check runs on Cloudflare, whose addresses change, and a key limited to one address will be refused. A Vultr key can do anything your account can.',
+    keyFields: [{id: 'key', label: 'API key', type: 'secret', ph: 'API key'}],
+    signal: 'exact',
+    signalText: 'Vultr lists, for every region, the plans that can be deployed there right now. API Check asks the regions where the plans you watch are sold, on every check.',
+    regionsLabel: 'Regions',
+    launch: [
+      {id: 'ssh_key', label: 'SSH key', type: 'select', from: 'sshKeys', empty: 'Every key on the account'},
+      {id: 'os', label: 'Operating system', type: 'select', from: 'os', empty: 'Newest Ubuntu LTS', help: 'NVIDIA drivers are not part of a plain Ubuntu image; install them in the startup script or choose an image that has them.'},
+      {id: 'name', label: 'Label', type: 'text', max: 50, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$', ph: 'apicheck-…'},
+      {id: 'hostname', label: 'Hostname', type: 'text', max: 63, pattern: '^[a-z0-9][a-z0-9-]{0,62}$'},
+      {id: 'user_data', label: 'Startup script (cloud-init)', type: 'textarea', max: 60000, code: true}
+    ],
+    notes: ['8x H100 comes two ways: bare metal (vbm-…-8-h100-gpu, about 2015 GiB RAM) and Cloud GPU (vcg-h100-…, about 1884 GiB). Both are listed; watch either or both.', 'Vultr bills by the hour while the machine exists, on or off. Bare metal installs for several minutes after it is accepted.', 'Vultr may ask a new account for a deposit or a check before bare metal or GPU servers can be deployed. Deploy-test in the console once if you are unsure.']
+  },
+  gcore: {
+    name: 'Gcore', short: 'G', site: 'https://portal.gcore.com',
+    keyHelp: 'A permanent API token: Gcore Customer Portal, Profile, API tokens, Create token, with a role that may manage cloud resources and an end date. Paste it with or without the "APIKey " in front. The machines go into your default cloud project.',
+    keyFields: [{id: 'key', label: 'API token', type: 'secret', ph: '1234$abcd…'}],
+    signal: 'count',
+    signalText: 'Gcore reports, for every GPU flavor in every region, how many machines are available to your account now (bare metal and virtual). API Check reads that number on every check and treats 1 or more as available.',
+    regionsLabel: 'Regions',
+    launch: [
+      {id: 'ssh_key', label: 'SSH key', type: 'select', from: 'sshKeys', empty: 'The first key in the project'},
+      {id: 'image', label: 'Image', type: 'select', from: 'images', empty: 'Newest Ubuntu with a GPU driver', regionBound: true, help: 'Images belong to a region and a machine kind.'},
+      {id: 'disk_size', label: 'Boot disk for virtual machines, GiB', type: 'number', min: 50, max: 4096, int: true, def: 200, help: 'Bare metal uses its own disks.'},
+      {id: 'name', label: 'Cluster name', type: 'text', max: 50, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]*$', ph: 'apicheck-…'},
+      {id: 'user_data', label: 'Startup script (cloud-init)', type: 'textarea', max: 60000, code: true}
+    ],
+    notes: ['8x H100 with InfiniBand is bare metal with 2 TB RAM (Luxembourg and Finland among others). Every region has a quota of H100 servers per account; a new project may have 0 until Gcore support raises it.', 'Gcore follows each creation for up to four minutes. A creation that ends in error is deleted at once, and the hunt goes on.', 'Gcore bills by the minute while a machine exists; prices are shown in the currency Gcore uses, before VAT.']
   }
 };
 export const DEV_PROVIDER = {

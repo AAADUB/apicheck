@@ -2,7 +2,7 @@
 
 A closed workspace that watches GPU clouds through their own APIs and, the moment a chosen configuration can be started, emails you or starts the machine.
 
-Providers: **Lambda**, **UpCloud**, **Nebius**, **RunPod**, **Hyperstack** (plus a test provider that exists only with `DEV_TOOLS=1`).
+Providers: **Lambda**, **UpCloud**, **Nebius**, **RunPod**, **Hyperstack**, **DigitalOcean**, **Vultr**, **Gcore** (plus a test provider that exists only with `DEV_TOOLS=1`).
 
 ## How it works
 
@@ -21,8 +21,11 @@ Providers: **Lambda**, **UpCloud**, **Nebius**, **RunPod**, **Hyperstack** (plus
 | Nebius | capacity advisor `GET /capacity/v1/resource-advice?parentId=<tenant>` (high/medium/low, quota-aware) | `POST /compute/v1/instances` + operation polling; failed VMs are deleted with their boot disk | Service-account key → RS256 JWT → 12 h token from `auth.eu.nebius.com`; on-demand or preemptible |
 | RunPod | REST v2 `GET /v2/catalog/gpus?include=AVAILABILITY&product=POD&count=N&cloud=C` per data center | `POST /v2/pods`; 400 = not placed, 402 balance, 422 bad request | REST v1 retired 15.11.2026; pods are containers (no Docker inside) |
 | Hyperstack | `GET /core/flavors` (`stock_available` per flavor and region) and `GET /core/stocks` (machines deployable per GPU count) | `POST /core/virtual-machines` with the region's environment, SSH key and image | 500 requests/min per IP; no documented "no capacity" code |
+| DigitalOcean | `GET /v2/sizes` → `regions` and `available` per GPU size (how fast a sold-out region drops out is undocumented) | `POST /v2/droplets` (202), create action followed ~60 s; errored Droplet destroyed | 5000 req/h, 250/min per token; GPU Droplets listed only with `?type=gpus`; image `gpu-h100x8-base` |
+| Vultr | `GET /v2/regions/{id}/availability` → `available_plans` (plans deployable now), asked only where the plan's `locations` say it is sold | bare metal `POST /v2/bare-metals`, Cloud GPU `POST /v2/instances` | 30 req/s per IP; key Access Control must allow any address (Cloudflare) |
+| Gcore | `GET /cloud/v3/gpu/{baremetal,virtual}/{project}/{region}/flavors` → `capacity` (instances available to the client) | `POST …/clusters` (1 server) → task followed up to 240 s; ERROR = cluster deleted | `Authorization: APIKey …`; per-region H100 quota in `/cloud/v2/client_quotas`; configuration ids `bm:`/`vm:` + flavor |
 
-The full notes behind this table are in `docs/research/`.
+DigitalOcean, Vultr and Gcore were read 21.11.2026. The full notes behind this table are in `docs/research/`.
 
 ## Layout
 

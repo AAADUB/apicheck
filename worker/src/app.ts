@@ -34,6 +34,7 @@ function readSecret(provider: string, raw: unknown): string {
   const s = String(raw ?? '').trim();
   if (!s || s.length > 12000) bad('key_format');
   if (provider === 'nebius') { try { JSON.parse(s); } catch { bad('key_format'); } return s; }
+  if (provider === 'gcore') { const t = s.replace(/^apikey\s+/i, ''); if (/\s/.test(t)) bad('key_format'); return t; }   // Gcore shows the token with an "APIKey " prefix
   if (/\s/.test(s)) bad('key_format');
   return s;
 }

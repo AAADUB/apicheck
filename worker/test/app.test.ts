@@ -8,6 +8,9 @@ import {upcloud} from '../src/providers/upcloud';
 import {runpod} from '../src/providers/runpod';
 import {nebius, readCreds} from '../src/providers/nebius';
 import {hyperstack} from '../src/providers/hyperstack';
+import {digitalocean} from '../src/providers/digitalocean';
+import {vultr, metalOf, vcgOf} from '../src/providers/vultr';
+import {gcore, ramOf} from '../src/providers/gcore';
 import {MADE} from '../src/providers/fake';
 import {ProviderError} from '../src/types';
 import {paceOf} from '../src/providers/net';
@@ -156,6 +159,122 @@ describe('Hyperstack adapter', () => {
     expect(await kindOf(hyperstack.launch(ctx(err(429, ''), 'hs-key-0000000008'), plan))).toBe('rate');
     const found = await hyperstack.find(ctx(mock([['/core/virtual-machines', 200, {instances: [{id: 9, name: 'comp-abc123x', status: 'ACTIVE'}, {id: 8, name: 'comp-abc123', status: 'BUILD'}]}]]), 'hs-key-0000000009'), plan);
     expect(found).toEqual({extId: '8', status: 'BUILD'});
+  });
+});
+
+describe('DigitalOcean adapter', () => {
+  const h100x8 = {slug: 'gpu-h100x8-640gb', memory: 1966080, vcpus: 160, disk: 2046, price_hourly: 35.28, regions: ['ams3', 'nyc2'], available: true, description: 'H100 GPU - 8X', gpu_info: {count: 8, model: 'nvidia_h100', vram: {amount: 80, unit: 'gib'}}};
+  const sizes = {sizes: [h100x8, {slug: 's-1vcpu-1gb', memory: 1024, vcpus: 1, regions: ['ams3'], available: true}], links: {}};
+  const keys = {ssh_keys: [{id: 11, name: 'laptop', fingerprint: 'aa:bb'}], links: {}};
+  it('reads GPU sizes and the datacenters that list them', async () => {
+    const f = mock([['/sizes', 200, sizes]]);
+    expect(await digitalocean.offers(ctx(f, 'dop_v1_test'), {spec: {}})).toEqual([{config: 'gpu-h100x8-640gb', region: 'ams3', level: 'yes'}, {config: 'gpu-h100x8-640gb', region: 'nyc2', level: 'yes'}]);
+    expect(f.log[0].init.headers.authorization).toBe('Bearer dop_v1_test');
+    const g = mock([['/sizes', 200, sizes], ['/regions', 200, {regions: [{slug: 'ams3', name: 'Amsterdam 3'}], links: {}}], ['/account/keys', 200, keys], ['/account', 200, {account: {email: 'a@b.c', droplet_limit: 10, status: 'active'}}], ['/balance', 200, {account_balance: '0.00', month_to_date_balance: '1.00'}]]);
+    const c = await digitalocean.catalog(ctx(g, 'dop_v1_test'));
+    expect(c.configs).toHaveLength(1);
+    expect(c.configs[0]).toMatchObject({id: 'gpu-h100x8-640gb', gpus: 8, gpu: 'H100 SXM', ramGb: 2062, price: 35.28});
+    expect(c.options.sshKeys).toEqual([{id: '11', name: 'laptop', detail: 'aa:bb'}]);
+  });
+  it('creates the Droplet with the 8-GPU image, follows the action, and destroys an errored one', async () => {
+    const plan = {config: 'gpu-h100x8-640gb', region: 'ams3', name: 'comp-abc123', spec: {launch: {}}};
+    const f = mock([['/droplets', 202, {droplet: {id: 7, status: 'new'}, links: {actions: [{id: 99}]}}], ['/actions/99', 200, {action: {status: 'in-progress'}}], ['/account/keys', 200, keys], ['/sizes', 200, sizes]]);
+    const r = await (async () => { const g = mock([['/actions/99', 200, {action: {status: 'completed'}}], ['/droplets', 202, {droplet: {id: 7, status: 'new'}, links: {actions: [{id: 99}]}}], ['/account/keys', 200, keys], ['/sizes', 200, sizes]]); const x = await digitalocean.launch(ctx(g), plan); return {x, g}; })();
+    expect(r.x.extId).toBe('7');
+    const body = JSON.parse(r.g.log.find(h => h.init.method === 'POST').init.body);
+    expect(body).toMatchObject({name: 'comp-abc123', region: 'ams3', size: 'gpu-h100x8-640gb', image: 'gpu-h100x8-base', ssh_keys: [11], tags: ['apicheck']});
+    const e = mock([['/actions/99', 200, {action: {status: 'errored'}}], ['/droplets', 202, {droplet: {id: 8, status: 'new'}, links: {actions: [{id: 99}]}}], ['/account/keys', 200, keys], ['/sizes', 200, sizes]]);
+    expect(await kindOf(digitalocean.launch(ctx(e), plan))).toBe('capacity');
+    expect(e.log.some(h => h.init.method === 'DELETE' && h.url.endsWith('/droplets/8'))).toBe(true);
+    void f;
+  });
+  it('sorts errors', async () => {
+    const plan = {config: 'gpu-h100x8-640gb', region: 'ams3', name: 'comp', spec: {launch: {}}};
+    const err = (status: number, message: string) => mock([['/droplets', status, {id: 'unprocessable_entity', message}], ['/account/keys', 200, keys], ['/sizes', 200, sizes]]);
+    expect(await kindOf(digitalocean.launch(ctx(err(422, 'Size is not available in this region.')), plan))).toBe('capacity');
+    expect(await kindOf(digitalocean.launch(ctx(err(422, 'creating this/these droplet(s) will exceed your droplet limit')), plan))).toBe('quota');
+    expect(await kindOf(digitalocean.launch(ctx(err(422, 'You specified an invalid image for Droplet creation.')), plan))).toBe('invalid');
+    expect(await kindOf(digitalocean.launch(ctx(err(401, 'Unable to authenticate you')), plan))).toBe('auth');
+    expect(await kindOf(digitalocean.launch(ctx(err(429, 'API rate limit exceeded.')), plan))).toBe('rate');
+  });
+  it('lists GPU Droplets for the account guard and finds one by name', async () => {
+    const f = mock([['/droplets?type=gpus', 200, {droplets: [{id: 7, name: 'comp-abc123', status: 'new', size_slug: 'gpu-h100x8-640gb', region: {slug: 'ams3'}}], links: {}}]]);
+    expect(await digitalocean.active(ctx(f), {})).toEqual([{extId: '7', name: 'comp-abc123', config: 'gpu-h100x8-640gb', region: 'ams3', status: 'new'}]);
+    expect(await digitalocean.find(ctx(f), {config: 'gpu-h100x8-640gb', region: 'ams3', name: 'comp-abc123', spec: {}})).toEqual({extId: '7', status: 'new'});
+    expect(f.log[0].url).toContain('type=gpus');
+  });
+});
+
+describe('Vultr adapter', () => {
+  const metal = {plans_metal: [{id: 'vbm-112c-2048gb-8-h100-gpu', cpu_count: 112, cpu_threads: 224, ram: 2063720, disk: 1920, disk_count: 1, monthly_cost: 17461.6, type: 'NVMe', locations: ['ams', 'ewr']}, {id: 'vbm-4c-32gb', cpu_count: 4, ram: 32768, monthly_cost: 120, locations: ['ams']}], meta: {links: {next: ''}}};
+  const vcg = {plans: [{id: 'vcg-h100-216c-1914gb-640vram', vcpu_count: 216, ram: 1959936, disk: 13312, gpu_vram_gb: 640, gpu_type: 'NVIDIA_H100', monthly_cost: 17461.6, hourly_cost: 23.92, locations: ['fra']}], meta: {links: {next: ''}}};
+  const os = {os: [{id: 1743, name: 'Ubuntu 22.04 LTS x64', arch: 'x64', family: 'ubuntu'}, {id: 2284, name: 'Ubuntu 24.04 LTS x64', arch: 'x64', family: 'ubuntu'}, {id: 124, name: 'Windows 2012 R2 x64', arch: 'x64', family: 'windows'}], meta: {links: {next: ''}}};
+  const keys = {ssh_keys: [{id: 'k-1', name: 'laptop'}], meta: {links: {next: ''}}};
+  it('reads GPU plans from both lists', () => {
+    expect(metalOf(metal.plans_metal[0])).toMatchObject({kind: 'metal', gpus: 8, gpu: 'H100', ramGb: 2164, price: 23.92});
+    expect(metalOf(metal.plans_metal[1])).toBe(null);
+    expect(vcgOf(vcg.plans[0])).toMatchObject({kind: 'vcg', gpus: 8, gpu: 'H100', price: 23.92});
+  });
+  it('asks only the regions the watch names, where the plan is sold', async () => {
+    const f = mock([['/plans-metal', 200, metal], ['/plans?type=vcg', 200, vcg], ['/regions/ams/availability', 200, {available_plans: ['vbm-112c-2048gb-8-h100-gpu', 'vbm-4c-32gb']}], ['/regions/ewr/availability', 200, {available_plans: []}]]);
+    expect(await vultr.offers(ctx(f, 'VULTRKEY'), {spec: {configs: ['vbm-112c-2048gb-8-h100-gpu'], regions: ['ams']}})).toEqual([{config: 'vbm-112c-2048gb-8-h100-gpu', region: 'ams', level: 'yes'}]);
+    expect(f.log.some(h => h.url.includes('/regions/ewr/'))).toBe(false);
+    expect(f.log[0].init.headers.authorization).toBe('Bearer VULTRKEY');
+  });
+  it('creates bare metal and Cloud GPU machines on their own endpoints and sorts errors', async () => {
+    const f = mock([['/bare-metals', 202, {bare_metal: {id: 'bm-1', status: 'pending'}}], ['/os', 200, os], ['/ssh-keys', 200, keys]]);
+    const r = await vultr.launch(ctx(f), {config: 'vbm-112c-2048gb-8-h100-gpu', region: 'ams', name: 'comp-abc123', spec: {launch: {user_data: 'echo hi'}}});
+    expect(r.extId).toBe('bm-1');
+    const body = JSON.parse(f.log.find(h => h.init.method === 'POST').init.body);
+    expect(body).toMatchObject({region: 'ams', plan: 'vbm-112c-2048gb-8-h100-gpu', os_id: 2284, label: 'comp-abc123', sshkey_id: ['k-1'], user_data: btoa('echo hi'), activation_email: false});
+    const g = mock([['/instances', 202, {instance: {id: 'vm-1', status: 'pending'}}], ['/os', 200, os], ['/ssh-keys', 200, keys]]);
+    expect((await vultr.launch(ctx(g), {config: 'vcg-h100-216c-1914gb-640vram', region: 'fra', name: 'comp', spec: {launch: {}}})).extId).toBe('vm-1');
+    expect(JSON.parse(g.log.find(h => h.init.method === 'POST').init.body).backups).toBe('disabled');
+    const err = (status: number, error: string) => mock([['/bare-metals', status, {error, status}], ['/os', 200, os], ['/ssh-keys', 200, keys]]);
+    const plan = {config: 'vbm-112c-2048gb-8-h100-gpu', region: 'ams', name: 'comp', spec: {launch: {}}};
+    expect(await kindOf(vultr.launch(ctx(err(400, 'Plan is not available in the selected region.')), plan))).toBe('capacity');
+    expect(await kindOf(vultr.launch(ctx(err(400, 'Insufficient funds to deploy this server.')), plan))).toBe('money');
+    expect(await kindOf(vultr.launch(ctx(err(403, 'Unauthorized IP address: 104.28.1.1')), plan))).toBe('auth');
+    expect(await kindOf(vultr.launch(ctx(err(400, 'Invalid os_id')), plan))).toBe('invalid');
+  });
+  it('guards both kinds of machine and finds one by label', async () => {
+    const f = mock([['/bare-metals', 200, {bare_metals: [{id: 'bm-1', label: 'comp-abc123', plan: 'vbm-112c-2048gb-8-h100-gpu', region: 'ams', status: 'pending', power_status: 'running'}], meta: {links: {next: ''}}}], ['/instances', 200, {instances: [], meta: {links: {next: ''}}}]]);
+    expect(await vultr.active(ctx(f), {})).toEqual([{extId: 'bm-1', name: 'comp-abc123', config: 'vbm-112c-2048gb-8-h100-gpu', region: 'ams', status: 'pending'}]);
+    expect(await vultr.find(ctx(f), {config: 'vbm-112c-2048gb-8-h100-gpu', region: 'ams', name: 'comp-abc123', spec: {}})).toEqual({extId: 'bm-1', status: 'pending'});
+  });
+});
+
+describe('Gcore adapter', () => {
+  const projects = {count: 1, results: [{id: 5, client_id: 9, name: 'default', is_default: true, state: 'ACTIVE'}]};
+  const regions = {count: 2, results: [{id: 76, display_name: 'Luxembourg-2', country: 'LU', has_ai_gpu: true, state: 'ACTIVE'}, {id: 1, display_name: 'Manassas', country: 'US', has_ai_gpu: false, state: 'ACTIVE'}]};
+  const fl = {count: 2, results: [{name: 'bm3-ai-1xlarge-h100-80-8', capacity: 2, disabled: false, reserved_capacity: 0, hardware_properties: {gpu_count: 8, gpu_model: 'H100'}, hardware_description: {ram: '2TB', cpu: '2x Intel Xeon 8480+', gpu: '8x H100'}, price: {price_per_hour: 30.01, currency_code: 'EUR', price_status: 'show'}},
+    {name: 'bm3-ai-1xlarge-a100-80-8', capacity: 0, disabled: false, hardware_properties: {gpu_count: 8, gpu_model: 'A100'}, hardware_description: {ram: '2048 GB'}}]};
+  const images = {count: 1, results: [{id: 'img-1', name: 'ubuntu-22.04-x64-nvidia-535', os_distro: 'ubuntu', os_version: '22.04', status: 'active', gpu_driver: 'nvidia-535', architecture: 'x86_64'}]};
+  const keys = {count: 1, results: [{id: 'k', name: 'laptop'}]};
+  it('reads RAM written either way', () => { expect(ramOf('2TB')).toBe(2048); expect(ramOf('2048 GB')).toBe(2048); expect(ramOf(1856)).toBe(1856); });
+  it('reads the available count per flavor and region, with the APIKey prefix taken off', async () => {
+    const f = mock([['/cloud/v1/projects', 200, projects], ['/cloud/v1/regions', 200, regions], ['/cloud/v3/gpu/baremetal/5/76/flavors', 200, fl]]);
+    const o = await gcore.offers(ctx(f, 'APIKey 1234$gcore-offers'), {spec: {configs: ['bm:bm3-ai-1xlarge-h100-80-8']}});
+    expect(o).toEqual([{config: 'bm:bm3-ai-1xlarge-h100-80-8', region: '76', level: 'yes', note: '2 available'}]);
+    expect(f.log[0].init.headers.authorization).toBe('APIKey 1234$gcore-offers');
+    expect(f.log.some(h => h.url.includes('/gpu/virtual/'))).toBe(false);   // only bare metal is watched
+  });
+  it('creates a one-server cluster and follows the task', async () => {
+    const plan = {config: 'bm:bm3-ai-1xlarge-h100-80-8', region: '76', name: 'comp-abc123', spec: {launch: {user_data: 'echo hi'}}};
+    const f = mock([['/cloud/v1/projects', 200, projects], ['/images', 200, images], ['/ssh_keys/5', 200, keys], ['/clusters', 200, {tasks: ['t1']}], ['/tasks/t1', 200, {id: 't1', state: 'FINISHED', created_resources: {ai_clusters: ['c-1']}}]]);
+    const r = await gcore.launch(ctx(f, '1234$gcore-launch'), plan);
+    expect(r.extId).toBe('c-1');
+    const body = JSON.parse(f.log.find(h => h.init.method === 'POST').init.body);
+    expect(body).toMatchObject({name: 'comp-abc123', flavor: 'bm3-ai-1xlarge-h100-80-8', servers_count: 1, image_id: 'img-1', servers_settings: {interfaces: [{type: 'external', ip_family: 'ipv4'}], credentials: {ssh_key_name: 'laptop'}, user_data: btoa('echo hi')}});
+    const e = mock([['/cloud/v1/projects', 200, projects], ['/images', 200, images], ['/ssh_keys/5', 200, keys], ['/clusters', 200, {tasks: ['t2']}], ['/tasks/t2', 200, {id: 't2', state: 'ERROR', error: 'No available hosts for flavor bm3-ai-1xlarge-h100-80-8', created_resources: {ai_clusters: ['c-2']}}]]);
+    expect(await kindOf(gcore.launch(ctx(e, '1234$gcore-launch2'), plan))).toBe('capacity');
+    expect(e.log.some(h => h.init.method === 'DELETE' && h.url.endsWith('/clusters/c-2'))).toBe(true);
+    const q = mock([['/cloud/v1/projects', 200, projects], ['/images', 200, images], ['/ssh_keys/5', 200, keys], ['/clusters', 200, {tasks: ['t3']}], ['/tasks/t3', 200, {id: 't3', state: 'ERROR', error: 'Quota exceeded: baremetal_gpu_h100_count'}]]);
+    expect(await kindOf(gcore.launch(ctx(q, '1234$gcore-launch3'), plan))).toBe('quota');
+  });
+  it('lists clusters of both kinds for the account guard', async () => {
+    const f = mock([['/cloud/v1/projects', 200, projects], ['/cloud/v1/regions', 200, regions], ['/gpu/baremetal/5/76/clusters', 200, {count: 1, results: [{id: 'c-1', name: 'comp-abc123', flavor: 'bm3-ai-1xlarge-h100-80-8'}]}], ['/gpu/virtual/5/76/clusters', 200, {count: 0, results: []}]]);
+    expect(await gcore.active(ctx(f, '1234$gcore-active'), {})).toEqual([{extId: 'c-1', name: 'comp-abc123', config: 'bm:bm3-ai-1xlarge-h100-80-8', region: '76', status: 'exists'}]);
   });
 });
 

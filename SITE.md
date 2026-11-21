@@ -46,6 +46,9 @@ Practices adopted: separate "seen" from "launched"; write the launch before call
   failed VMs deleted with retries, operation wait 240 s; a started machine counts until "Read status" confirms it is gone (state ended);
   "Nothing was started" button for unconfirmed launches; late machines after a 5xx are looked up again; RunPod 403 = next candidate;
   three refusals with odd wording = one email; three auth refusals in a row before a key is given up; polls time out after 8 s.
+- 21.11.2026 — v1.4: DigitalOcean (GPU Droplets; sizes list as the signal, create action followed, errored Droplet destroyed), Vultr (bare metal and Cloud GPU;
+  per-region availability of plans) and Gcore (bare metal and virtual GPU clusters; capacity per flavor and region, task followed, quota in the launch check) added,
+  each with launch, account guard, find by name and launch check. "Europe" region choice now also reads region names (Gcore numbers its regions). 42 tests.
 - 20.11.2026 — v1.2: Hyperstack added (flavors with stock_available plus /core/stocks; launch with the region's environment, key and image; ERROR right after acceptance = deleted and treated as capacity).
   Launch safety rebuilt: atomic claim in D1 before every launch (watch limit and shared group limit, pending/created/unknown all count); unique machine name per attempt;
   an unclear answer (timeout, network, 5xx) is settled by looking the machine up by name (Lambda, UpCloud, Nebius, RunPod, Hyperstack) and never by asking again;
