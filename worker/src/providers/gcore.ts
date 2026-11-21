@@ -145,7 +145,7 @@ export const gcore: Provider = {
         cfg.set(id, {id, name: `${hp.gpu_count}x ${model} ${kind === 'baremetal' ? 'bare metal' : 'VM'}`, gpu: model, gpus: hp.gpu_count, vcpus: typeof hd.vcpus === 'number' ? hd.vcpus : undefined,
           ramGb: ramOf(hd.ram), vramGb: /h100|a100/i.test(model) ? 80 : /h200/i.test(model) ? 141 : undefined,
           price: pr.price_status !== 'hide' && pr.price_per_hour ? round2(pr.price_per_hour) : undefined, currency: pr.currency_code || 'EUR', regions: [String(r.id)],
-          note: [typeof hd.ram === 'string' ? 'RAM ' + hd.ram : '', hd.cpu, hp.nic_ib ? 'InfiniBand ' + hp.nic_ib : ''].filter(Boolean).join('; ') || undefined});
+          note: [typeof hd.ram === 'string' ? 'RAM ' + hd.ram : '', hd.cpu, hd.disk ? 'disks ' + hd.disk : '', hd.ephemeral ? 'local ' + hd.ephemeral : '', hp.nic_ib ? 'InfiniBand ' + hp.nic_ib : '', hd.network ? 'network ' + hd.network : '', hp.nic_eth ? 'Ethernet ' + hp.nic_eth : ''].filter(Boolean).join('; ') || undefined});
       }
       try { for (const i of await images(c, p.id, String(r.id), kind)) imgs.push({id: i.id, name: `${i.name} (${r.display_name}, ${kind === 'baremetal' ? 'bare metal' : 'VM'})`, region: String(r.id), detail: kind}); } catch { /* images are optional */ }
     })));
