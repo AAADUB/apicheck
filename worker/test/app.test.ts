@@ -99,9 +99,9 @@ describe('RunPod adapter', () => {
 });
 
 describe('Nebius adapter', () => {
-  it('reads the credentials file and refuses a PKCS#1 key', () => {
+  it('reads the credentials file the CLI writes', () => {
     expect(readCreds(JSON.stringify({'subject-credentials': {alg: 'RS256', 'private-key': '-----BEGIN PRIVATE KEY-----\nAAA\n-----END PRIVATE KEY-----', kid: 'publickey-1', iss: 'serviceaccount-1', sub: 'serviceaccount-1'}}))).toMatchObject({kid: 'publickey-1', iss: 'serviceaccount-1'});
-    expect(() => readCreds(JSON.stringify({'subject-credentials': {'private-key': '-----BEGIN RSA PRIVATE KEY-----', kid: 'a', iss: 'b'}}))).toThrow(/PKCS#1/);
+    expect(() => readCreds(JSON.stringify({'subject-credentials': {kid: 'a'}}))).toThrow(/private-key/);
   });
   it('signs a JWT, exchanges it, and maps the capacity advisor', async () => {
     const pair = await crypto.subtle.generateKey({name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256'}, true, ['sign', 'verify']) as CryptoKeyPair;
@@ -211,6 +211,20 @@ describe('launch safety in the adapters', () => {
     try { await nebius.launch(ctx(f, creds, {projects: {'eu-north1': 'project-1'}}), plan); throw new Error('no'); }
     catch (e: any) { expect(e).toBeInstanceOf(ProviderError); expect(e.status).toBe(1); expect(e.kind).toBe('http'); }
     expect(f.log.some(h => h.init.method === 'DELETE' && h.url.endsWith('/compute/v1/instances/ci-1'))).toBe(true);
+  });
+});
+
+describe('Nebius key pasted from the console', () => {
+  // a throwaway 2048-bit test key in the old PKCS#1 form that openssl on a Mac writes
+  const PKCS1 = '-----BEGIN RSA PRIVATE KEY-----\nMIIEogIBAAKCAQEAvk2yrZJnThze3mWMdAA27uulyHdmLeWG9SHDReQ57zyPjxH3\nJpfGxi2YLRt92pC/fps6C/fn0Amewct1Gu6nbcWSrztC1mHN26fJrxE5Km4KIf1o\nf80W381XL9VzC/t6sgWy2PH3xYP3s/PvyTkjhx025d1LVVhH+h/Gc5XJ28C9v0rX\nZb4BUSamw7rj1FwXm0HWZKQ5ssNaWmjWL4rNo8BV+xIWC0TmJXHelGIoolzJdZfw\nbNZ5cYEikVVbuZuBMZPEdYljZn5pXB2JPJfKwKla3BuXBPYNoDqLqu1WOvCMFVMC\nFSe7LvE1jw+HW0sUayTsbsF7uRTfi2YgGCFzcQIDAQABAoIBAA04tjmHcqxzZouS\niBXWHvrt/dRl8UAukngM+rVsJBdKQJoa0C5K/LkvmUNHBfEtvdQ0wi1rMZybUn+Z\n3F685n6Cq8yHZD8jR+tjJqjGXE+lmggfBEfezqBJcq2E2aujMvTT3wdiFkoPf2Hu\nCIKVOPHt9m61d4KsMcH/u6izpzTgejhlDxOdvL2NdZnOmqfR2S7lfV4XbE6jULnF\ndp8eDx34ELXzfKiruUjcXJ4yKbELVJJVWLLLjIjmlyIqG5fOtytZJX1dScirOaq6\nR3/AeM9BsLjoFuqEFoMeQJfI5jiCYQ9Zrey9uxpA5MX5sCJigEMeOmGNyMVQfvxT\nS1yzx00CgYEA75ls/JNZkBvUPfltumvJrGAHpvIVOv0/0T3hcGpDwFW9SyIY+Joc\n6ugQajN41j2Tr++7ISEcQ+AljE1RefIs4tM/1S1ay/DHQXfK5Mq19rmulPzHRavR\nN3z6IynTr9UVzUp01A1qWkZLuihzV1Y8JDd/KQZXRSTbuVUZ6MD+UrUCgYEAy1Ry\nOvuAk30GGvY6hpbbl/xRQ6tbLTPXX2OAIvyMmfXino9dhi170DIkTHFI6INXgeu+\niBSoEpl9NO2n/4asXhK+4Yx6X2hHCou7RpeGhIdA8O8nH70xipqSPms6yyGNH+8T\nk6UPAonTWEvrjhd9+LobU6z/lLvfvKX4WSGFJ00CgYAYNap7gvADzawObwuVUJra\nHgHn7oISqdAu9k+3KiWaY49y7gkT5Y6Sdcxizryg+SvZFSIVYOEYQqfIm29mIQBE\nExBaG/EWtkeL5+zKXWkxeuWXDEueUJQdRTWJJArNs3w2eBWB77EVWhEAyGGPK5l8\nF1dz774VsHm7Kkwp5oZMGQKBgBw5P5XyXTmbzCIn9Z3DCP5C1uDmw0Q2AvpJrHqu\nxbGFUQyjZ979J0eR/jniK7WirZ3qJEttWpsiVR/osT4l6n0wavCR+FaP+fR7yuYU\nmGaDA7+t4qdkMqFDrXMenU2e/aDmJbiD296FVSHXf/38Qs8ovixSQjPaFEdyXlO4\n9GutAoGAecostNWkqCjFfr1vpOjZxX237PL88dEwUQ/PjYlul5eD0hViKafJ4bTA\nprEhOjCUbnpXt+7ol2RTRW2md7i6NjBvSMpxcp7vxBEe7IrlMHJYBJ4FWkW1ebvo\nt2U7p2TMZdiQ/y85Cjr7DyYA+JN87yu/ao6ogK/6YbWnsBuZTsk=\n-----END RSA PRIVATE KEY-----';
+  it('takes the service account ID, the key ID and a PKCS#1 private key pasted one under another', async () => {
+    const pasted = 'serviceaccount-e00abc123\npublickey-e00def456\n' + PKCS1;
+    expect(readCreds(pasted)).toMatchObject({iss: 'serviceaccount-e00abc123', sub: 'serviceaccount-e00abc123', kid: 'publickey-e00def456'});
+    const f = mock([['/oauth2/token/exchange', 200, {access_token: 't', expires_in: 3600}], ['/compute/v1/instances/ci-1', 200, {metadata: {id: 'ci-1'}, status: {state: 'RUNNING'}}]]);
+    await nebius.instance(ctx(f, pasted), 'ci-1');
+    const jwt = new URLSearchParams(String(f.log[0].init.body)).get('subject_token');
+    expect(JSON.parse(atob(jwt.split('.')[0].replace(/-/g, '+').replace(/_/g, '/')))).toMatchObject({alg: 'RS256', kid: 'publickey-e00def456'});
+    expect(() => readCreds('serviceaccount-e00abc123\n' + PKCS1)).toThrow(/authorized key ID/);
   });
 });
 

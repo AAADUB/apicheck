@@ -14,11 +14,24 @@ type Creds = {kid: string; iss: string; sub: string; key: string};
 
 /* the credentials file, or the same three values written out by hand */
 export function readCreds(secret: string): Creds {
-  let j: any; try { j = JSON.parse(secret); } catch { throw new ProviderError('auth', 'The credentials are not valid JSON.'); }
+  const t = String(secret || '').trim();
+  // the console way: the service account ID, the authorized key ID and the private key, pasted one after another in any order
+  if (!t.startsWith('{')) {
+    const sa = t.match(/serviceaccount-[a-z0-9]+/i), kid = t.match(/publickey-[a-z0-9]+/i), pem = t.match(/-----BEGIN (?:RSA )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA )?PRIVATE KEY-----/);
+    if (!sa || !kid || !pem) throw new ProviderError('auth', `Missing ${[!sa && 'the service account ID (serviceaccount-…)', !kid && 'the authorized key ID (publickey-…)', !pem && 'the whole private key (from -----BEGIN to -----END)'].filter(Boolean).join(', ')}.`);
+    return {kid: kid[0], iss: sa[0], sub: sa[0], key: pem[0]};
+  }
+  let j: any; try { j = JSON.parse(t); } catch { throw new ProviderError('auth', 'The credentials are not valid JSON.'); }
   const s = j['subject-credentials'] || j.subjectCredentials || j;
   const out = {kid: s.kid || s['public-key-id'] || s.publicKeyId, iss: s.iss || s['service-account-id'] || s.serviceAccountId, sub: s.sub || s.iss || s['service-account-id'] || s.serviceAccountId, key: s['private-key'] || s.privateKey};
   if (!out.kid || !out.iss || !out.key) throw new ProviderError('auth', 'The credentials need kid (the public key id), iss (the service account id) and private-key.');
-  if (/BEGIN RSA PRIVATE KEY/.test(out.key)) throw new ProviderError('auth', 'This private key is in the old PKCS#1 form. Convert it with: openssl pkcs8 -topk8 -nocrypt -in key.pem -out key-pkcs8.pem');
+  return out;
+}
+/* the old PKCS#1 form ("BEGIN RSA PRIVATE KEY", what openssl on a Mac writes) wrapped as PKCS#8, which is what WebCrypto reads */
+export function pkcs8Of(pkcs1: Uint8Array): Uint8Array {
+  const len = (n: number) => n < 0x80 ? [n] : n < 0x100 ? [0x81, n] : n < 0x10000 ? [0x82, n >> 8, n & 255] : [0x83, n >> 16, (n >> 8) & 255, n & 255];
+  const head = [0x02, 0x01, 0x00, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00, 0x04, ...len(pkcs1.length)];
+  const out = new Uint8Array([0x30, ...len(head.length + pkcs1.length), ...head, ...Array.from(pkcs1)]);
   return out;
 }
 const tokens = new Map<string, {token: string; until: number}>();
@@ -26,7 +39,8 @@ async function token(c: Ctx): Promise<string> {
   const cr = readCreds(c.secret), hit = tokens.get(cr.kid);
   if (hit && hit.until > Date.now() + 5 * 60e3) return hit.token;
   let key: CryptoKey;
-  try { key = await crypto.subtle.importKey('pkcs8', Uint8Array.from(atob(cr.key.replace(/-----[^-]+-----|\s/g, '')), ch => ch.charCodeAt(0)), {name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256'}, false, ['sign']); }
+  const der = Uint8Array.from(atob(cr.key.replace(/-----[^-]+-----|\s/g, '')), ch => ch.charCodeAt(0));
+  try { key = await crypto.subtle.importKey('pkcs8', /BEGIN RSA PRIVATE KEY/.test(cr.key) ? pkcs8Of(der) : der, {name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256'}, false, ['sign']); }
   catch { throw new ProviderError('auth', 'The private key could not be read. Paste the whole credentials file the Nebius CLI wrote.'); }
   const now = Math.floor(Date.now() / 1000);
   const head = b64u(enc.encode(JSON.stringify({alg: 'RS256', typ: 'JWT', kid: cr.kid}))), body = b64u(enc.encode(JSON.stringify({iss: cr.iss, sub: cr.sub, aud: 'token-service.iam.new.nebiuscloud.net', iat: now, exp: now + 60})));

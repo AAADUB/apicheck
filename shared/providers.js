@@ -65,8 +65,8 @@ export const PROVIDERS = {
   },
   nebius: {
     name: 'Nebius', short: 'N', site: 'https://console.nebius.com',
-    keyHelp: 'A service account key. In the console create a service account, give it the editor role in your tenant (viewer is enough to watch), then run: nebius iam auth-public-key generate --service-account-id <id> --output credentials.json, and paste the file here.',
-    keyFields: [{id: 'key', label: 'Credentials file (JSON)', type: 'textarea', code: true, ph: '{"subject-credentials": {"alg": "RS256", "private-key": "-----BEGIN PRIVATE KEY-----…", "kid": "publickey-…", "iss": "serviceaccount-…", "sub": "serviceaccount-…"}}'}],
+    keyHelp: 'A service account in the editors group, with an authorized key. Paste three things, one under another: the service account ID (serviceaccount-…), the authorized key ID (publickey-…) and the whole private key file (from -----BEGIN to -----END). A credentials file written by the Nebius CLI works too.',
+    keyFields: [{id: 'key', label: 'Service account ID, key ID and private key', type: 'textarea', code: true, ph: 'serviceaccount-e00…\npublickey-e00…\n-----BEGIN RSA PRIVATE KEY-----\n…\n-----END RSA PRIVATE KEY-----'}],
     signal: 'level',
     signalText: 'Nebius reports a chance of launch (high, medium, low) for every platform, preset and region, with your quota already taken into account (the capacity advisor). It is a forecast, refreshed by Nebius on its own schedule, not a reservation.',
     regionsLabel: 'Regions',
